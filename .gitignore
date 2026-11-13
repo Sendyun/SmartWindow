@@ -1,0 +1,6 @@
+*.user
+*.suo
+*.tmp
+*.log
+settings.ini
+
