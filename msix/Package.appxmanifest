@@ -13,7 +13,7 @@
     ProcessorArchitecture="x64" />
 
   <Properties>
-    <DisplayName>智慧窗</DisplayName>
+    <DisplayName>SmartWindow</DisplayName>
     <PublisherDisplayName>Sendyun Technology Unit</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
     <Description>Windows 11 顶部通知与音乐控制浮窗</Description>
