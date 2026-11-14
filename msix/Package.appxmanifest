@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 rescap">
+
+  <Identity
+    Name="SendyunTechnologyUnit.SmartWindow"
+    Publisher="CN=4591EE90-EA8E-423D-84B2-08FC9222DF54"
+    Version="1.0.1.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>智慧窗</DisplayName>
+    <PublisherDisplayName>Sendyun Technology Unit</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Windows 11 顶部通知与音乐控制浮窗</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily
+      Name="Windows.Desktop"
+      MinVersion="10.0.22000.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="zh-CN" />
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Applications>
+    <Application
+      Id="SmartWindow"
+      Executable="SmartWindow.exe"
+      EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="智慧窗"
+        Description="Windows 11 顶部通知与音乐控制浮窗"
+        BackgroundColor="#0B0D12"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          ShortName="智慧窗" />
+        <uap:SplashScreen
+          Image="Assets\SplashScreen.png"
+          BackgroundColor="#0B0D12" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap5:Extension
+          Category="windows.startupTask"
+          Executable="SmartWindow.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask
+            TaskId="SmartWindowStartup"
+            Enabled="false"
+            DisplayName="智慧窗" />
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+    <rescap:Capability Name="userNotificationListener" />
+  </Capabilities>
+
+</Package>
+

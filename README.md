@@ -33,6 +33,20 @@ Microsoft Store 安装程序：
 https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.0.1/SmartWindow-Setup-x64.exe
 ```
 
+Microsoft Store MSIX 上传文件：
+
+- `SmartWindow_1.0.1.0_x64.msixupload`
+- Package Identity：`SendyunTechnologyUnit.SmartWindow`
+- Publisher：`CN=4591EE90-EA8E-423D-84B2-08FC9222DF54`
+- 架构：`x64`
+
+重新生成 MSIX 时，先准备 Windows SDK 中的 `MakeAppx.exe` 与
+`SignTool.exe`，然后运行：
+
+```powershell
+.\msix\build-msix.ps1
+```
+
 ## 源码公开与非商业许可
 
 智慧窗采用自定义的“源码公开、限制商业使用”许可，不属于 OSI 认可的开源许可证。

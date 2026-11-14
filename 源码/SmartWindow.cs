@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Xml;
 using Microsoft.Win32;
@@ -181,6 +183,10 @@ namespace SmartWindow
 
         public static bool IsEnabled()
         {
+            if (PackagedStartupManager.IsSupported)
+            {
+                return PackagedStartupManager.IsEnabled();
+            }
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
@@ -200,6 +206,10 @@ namespace SmartWindow
 
         public static bool SetEnabled(bool enabled)
         {
+            if (PackagedStartupManager.IsSupported)
+            {
+                return PackagedStartupManager.SetEnabled(enabled);
+            }
             try
             {
                 using (RegistryKey key = Registry.CurrentUser.CreateSubKey(
@@ -233,11 +243,144 @@ namespace SmartWindow
 
         public static void RefreshCommandIfEnabled()
         {
+            if (PackagedStartupManager.IsSupported)
+            {
+                return;
+            }
             if (IsEnabled())
             {
                 SetEnabled(true);
             }
         }
+    }
+
+    internal static class PackagedStartupManager
+    {
+        private const string TaskId = "SmartWindowStartup";
+        private static readonly Type StartupTaskType =
+            Type.GetType(
+                "Windows.ApplicationModel.StartupTask, " +
+                "Windows.ApplicationModel, ContentType=WindowsRuntime");
+        private static readonly Type AsyncExtensionsType =
+            Type.GetType(
+                "System.WindowsRuntimeSystemExtensions, " +
+                "System.Runtime.WindowsRuntime");
+
+        public static bool IsSupported
+        {
+            get
+            {
+                if (StartupTaskType == null ||
+                    AsyncExtensionsType == null)
+                {
+                    return false;
+                }
+                uint length = 0;
+                int result = GetCurrentPackageFullName(
+                    ref length,
+                    null);
+                return result != 15700;
+            }
+        }
+
+        public static bool IsEnabled()
+        {
+            try
+            {
+                object task = Await(
+                    StartupTaskType.GetMethod(
+                        "GetAsync",
+                        new Type[] { typeof(string) })
+                        .Invoke(null, new object[] { TaskId }),
+                    StartupTaskType);
+                string state = task.GetType()
+                    .GetProperty("State")
+                    .GetValue(task, null)
+                    .ToString();
+                return state == "Enabled" ||
+                    state == "EnabledByPolicy";
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("PackagedStartupManager.IsEnabled: " + exception);
+                return false;
+            }
+        }
+
+        public static bool SetEnabled(bool enabled)
+        {
+            try
+            {
+                object current = Await(
+                    StartupTaskType.GetMethod(
+                        "GetAsync",
+                        new Type[] { typeof(string) })
+                        .Invoke(null, new object[] { TaskId }),
+                    StartupTaskType);
+                if (!enabled)
+                {
+                    current.GetType()
+                        .GetMethod("Disable")
+                        .Invoke(current, null);
+                    return true;
+                }
+
+                object result = Await(
+                    current.GetType()
+                        .GetMethod("RequestEnableAsync")
+                        .Invoke(current, null),
+                    StartupTaskType);
+                string state = result.GetType()
+                    .GetProperty("State")
+                    .GetValue(result, null)
+                    .ToString();
+                return state == "Enabled" ||
+                    state == "EnabledByPolicy";
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("PackagedStartupManager.SetEnabled: " + exception);
+                return false;
+            }
+        }
+
+        private static object Await(object operation, Type resultType)
+        {
+            MethodInfo asTask = null;
+            foreach (MethodInfo method in AsyncExtensionsType.GetMethods())
+            {
+                if (method.Name != "AsTask" ||
+                    !method.IsGenericMethod)
+                {
+                    continue;
+                }
+                ParameterInfo[] parameters = method.GetParameters();
+                if (parameters.Length == 1 &&
+                    parameters[0].ParameterType.Name.StartsWith(
+                        "IAsyncOperation",
+                        StringComparison.Ordinal))
+                {
+                    asTask = method;
+                    break;
+                }
+            }
+            if (asTask == null)
+            {
+                throw new MissingMethodException(
+                    "WindowsRuntime AsTask method was not found.");
+            }
+            Task task = (Task)asTask
+                .MakeGenericMethod(resultType)
+                .Invoke(null, new object[] { operation });
+            task.Wait();
+            return task.GetType().GetProperty("Result")
+                .GetValue(task, null);
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetCurrentPackageFullName(
+            ref uint packageFullNameLength,
+            StringBuilder packageFullName);
     }
 
     internal sealed class BannerState

@@ -5,4 +5,8 @@
 settings.ini
 /SmartWindow-Setup-x64.exe
 /*.zip
+/msix/staging/
+/msix/verify/
+/msix/upload/
+/msix/TestPublisher.cer
 
