@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
@@ -16,6 +17,22 @@ internal static class SmartWindowSetup
 
     [STAThread]
     private static int Main(string[] args)
+    {
+        bool createdNew;
+        using (Mutex setupMutex = new Mutex(
+            true,
+            @"Local\SmartWindow.Setup",
+            out createdNew))
+        {
+            if (!createdNew)
+            {
+                return 1618;
+            }
+            return Run(args);
+        }
+    }
+
+    private static int Run(string[] args)
     {
         bool silent = HasArgument(args, "/S") ||
             HasArgument(args, "/s") ||
@@ -60,6 +77,7 @@ internal static class SmartWindowSetup
         }
         catch (Exception exception)
         {
+            int exitCode = IsDiskFull(exception) ? 112 : 1603;
             if (!silent)
             {
                 MessageBox.Show(
@@ -68,8 +86,23 @@ internal static class SmartWindowSetup
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
-            return 1603;
+            return exitCode;
         }
+    }
+
+    private static bool IsDiskFull(Exception exception)
+    {
+        for (Exception current = exception;
+            current != null;
+            current = current.InnerException)
+        {
+            int code = current.HResult & 0xFFFF;
+            if (code == 39 || code == 112)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void Install(string targetDirectory)

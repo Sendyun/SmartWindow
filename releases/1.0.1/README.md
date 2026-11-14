@@ -16,3 +16,9 @@ https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.0.1/SmartW
 
 The installer installs SmartWindow for the current user without requiring administrator permissions.
 
+Installer return codes:
+
+```text
+https://github.com/Sendyun/SmartWindow/blob/main/docs/installer-exit-codes.md
+```
+
