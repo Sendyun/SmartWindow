@@ -98,6 +98,8 @@ UAC、安全桌面、部分驱动工具自绘提示和全屏独占程序中的�
 
 通知和媒体信息均从 Windows 本地接口读取。智慧窗不要求登录账号，也不会上传通知、音乐或播放历史。
 
+完整隐私政策：[PRIVACY.md](PRIVACY.md)
+
 ## 作者
 
 Sendyun Technology Unit  
