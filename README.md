@@ -21,9 +21,17 @@
 
 `SmartWindow.exe` 已内嵌 Logo、汉仪文黑 85W 字体和媒体辅助脚本，可以单独分发。
 
-完整压缩包：
+Microsoft Store 安装程序：
 
-- `SmartWindow-Ver1.0.1.zip`
+- [`releases/1.0.1/SmartWindow-Setup-x64.exe`](releases/1.0.1/SmartWindow-Setup-x64.exe)
+- 静默安装：`SmartWindow-Setup-x64.exe /S`
+- 静默卸载：`Uninstall SmartWindow.exe /uninstall /S`
+
+商店提交使用的固定版本下载地址：
+
+```text
+https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.0.1/SmartWindow-Setup-x64.exe
+```
 
 ## 源码公开与非商业许可
 
@@ -55,6 +63,14 @@
 ```
 
 构建需要 Windows 自带的 .NET Framework 4.x C# 编译器。
+
+生成 Microsoft Store 使用的 x64 安装程序：
+
+```powershell
+.\installer\build-installer.ps1
+```
+
+安装器源码位于 `installer` 目录。
 
 ## 系统要求
 
