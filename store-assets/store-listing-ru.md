@@ -55,6 +55,13 @@ SmartWindow обрабатывает уведомления и сведения 
 - Исправлено оставление фоновых медиапроцессов
 - Улучшена двусторонняя анимация растворения
 
+## Screenshots
+
+Reuse the existing English promotional screenshots:
+
+- `screenshot-notification-en.png`
+- `screenshot-music-en.png`
+
 ## Search terms
 
 уведомления, музыка, медиаплеер, управление музыкой, Windows 11, плавающее окно
