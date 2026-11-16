@@ -1,6 +1,6 @@
 # 智慧窗 / SmartWindow
 
-**Ver 1.1.0**
+**Ver 1.1.2**
 
 智慧窗是一款面向 Windows 11 的顶部通知与音乐控制浮窗工具。它将系统通知和当前媒体信息显示在屏幕顶部中央，并提供类似灵动岛的展开、收拢与音乐控制体验。
 
@@ -27,19 +27,19 @@
 
 Microsoft Store 安装程序：
 
-- [`releases/1.1.0/SmartWindow-Setup-x64.exe`](releases/1.1.0/SmartWindow-Setup-x64.exe)
+- [`releases/1.1.2/SmartWindow-Setup-x64.exe`](releases/1.1.2/SmartWindow-Setup-x64.exe)
 - 静默安装：`SmartWindow-Setup-x64.exe /S`
 - 静默卸载：`Uninstall SmartWindow.exe /uninstall /S`
 
 商店提交使用的固定版本下载地址：
 
 ```text
-https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.1.0/SmartWindow-Setup-x64.exe
+https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.1.2/SmartWindow-Setup-x64.exe
 ```
 
 Microsoft Store MSIX 上传文件：
 
-- `SmartWindow_1.1.0.0_x64.msixupload`
+- `SmartWindow_1.1.2.0_x64.msixupload`
 - Package Identity：`SendyunTechnologyUnit.SmartWindow`
 - Publisher：`CN=4591EE90-EA8E-423D-84B2-08FC9222DF54`
 - 架构：`x64`

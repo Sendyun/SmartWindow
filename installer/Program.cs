@@ -9,7 +9,7 @@ using Microsoft.Win32;
 internal static class SmartWindowSetup
 {
     private const string ProductName = "智慧窗";
-    private const string ProductVersion = "1.1.0";
+    private const string ProductVersion = "1.1.2";
     private const string Publisher =
         "Mr.Dove (Sendyun Technology Unit)";
     private const string UninstallKey =

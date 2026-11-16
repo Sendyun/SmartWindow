@@ -12,12 +12,16 @@ namespace SmartWindow
         private const int LogicalWidth = 1000;
         private const int LogicalHeight = 720;
         private const int HeaderHeight = 92;
-        private const string DisplayVersion = "Ver 1.1.0";
+        private const string DisplayVersion = "Ver 1.1.2";
 
-        private readonly Bitmap logo;
+        private readonly Bitmap logoLight;
+        private readonly Bitmap logoDark;
         private readonly Bitmap githubLogo;
         private readonly Timer renderTimer;
         private readonly Timer hoverRenderTimer;
+        private readonly Timer logoTimer;
+        private readonly Timer logoTransitionTimer;
+        private readonly Timer installationMarqueeTimer;
         private Font titleFont;
         private Font sectionFont;
         private Font bodyFont;
@@ -47,6 +51,15 @@ namespace SmartWindow
         private bool allowClose;
         private bool rendering;
         private bool renderPending;
+        private bool logoDarkMode;
+        private double logoBlend;
+        private double logoBlendTarget;
+        private DateTime installationDate = DateTime.Today;
+        private int installationDays = 1;
+        private string installationDayText = "";
+        private int installationTextWidth;
+        private bool installationTextNeedsScroll;
+        private double installationMarqueeOffset;
 
         public event EventHandler PauseToggleRequested;
         public event EventHandler MusicToggleRequested;
@@ -88,7 +101,8 @@ namespace SmartWindow
                 area.Left + (area.Width - Width) / 2,
                 area.Top + (area.Height - Height) / 2);
 
-            logo = RuntimeAssets.LoadLogo();
+            logoLight = RuntimeAssets.LoadLogoLight();
+            logoDark = RuntimeAssets.LoadLogoDark();
             githubLogo = RuntimeAssets.LoadGithubLogo();
             CreateFonts();
 
@@ -108,6 +122,50 @@ namespace SmartWindow
             hoverRenderTimer.Tick += delegate
             {
                 hoverRenderTimer.Stop();
+                RequestRender();
+            };
+            logoTimer = new Timer();
+            logoTimer.Interval = 3200;
+            logoTimer.Tick += delegate
+            {
+                logoDarkMode = !logoDarkMode;
+                logoBlendTarget = logoDarkMode ? 1.0 : 0.0;
+                logoTransitionTimer.Stop();
+                logoTransitionTimer.Start();
+                RequestRender();
+            };
+            logoTimer.Start();
+            logoTransitionTimer = new Timer();
+            logoTransitionTimer.Interval = 16;
+            logoTransitionTimer.Tick += delegate
+            {
+                double difference = logoBlendTarget - logoBlend;
+                if (Math.Abs(difference) < 0.002)
+                {
+                    logoBlend = logoBlendTarget;
+                    logoTransitionTimer.Stop();
+                }
+                else
+                {
+                    logoBlend += difference * 0.09;
+                }
+                RequestRender();
+            };
+            installationMarqueeTimer = new Timer();
+            installationMarqueeTimer.Interval = 60;
+            installationMarqueeTimer.Tick += delegate
+            {
+                if (!Visible || !installationTextNeedsScroll)
+                {
+                    installationMarqueeTimer.Stop();
+                    return;
+                }
+                installationMarqueeOffset += 1.8;
+                double cycle = installationTextWidth + 30.0;
+                if (installationMarqueeOffset >= cycle)
+                {
+                    installationMarqueeOffset = 0.0;
+                }
                 RequestRender();
             };
 
@@ -130,7 +188,8 @@ namespace SmartWindow
             bool isClickThrough,
             string status,
             double scale,
-            double opacity)
+            double opacity,
+            DateTime firstInstallDate)
         {
             paused = isPaused;
             musicEnabled = isMusicEnabled;
@@ -142,6 +201,11 @@ namespace SmartWindow
             clickThroughEnabled = isClickThrough;
             sizeScale = Math.Max(0.80, Math.Min(1.20, scale));
             consoleOpacity = Math.Max(0.0, Math.Min(1.0, opacity));
+            installationDate = firstInstallDate.Date;
+            installationDays = Math.Max(
+                1,
+                (DateTime.Today - installationDate).Days + 1);
+            UpdateInstallationDayText();
             if (!string.IsNullOrWhiteSpace(status))
             {
                 runtimeStatus = status;
@@ -165,6 +229,10 @@ namespace SmartWindow
             }
             Activate();
             BringToFront();
+            if (installationTextNeedsScroll)
+            {
+                installationMarqueeTimer.Start();
+            }
             RequestRender();
         }
 
@@ -172,6 +240,7 @@ namespace SmartWindow
         {
             CreateFonts();
             Text = Localization.Get("consoleTitle");
+            UpdateInstallationDayText();
             RequestRender();
         }
 
@@ -215,6 +284,10 @@ namespace SmartWindow
         {
             base.OnShown(e);
             ApplyBlur();
+            if (installationTextNeedsScroll)
+            {
+                installationMarqueeTimer.Start();
+            }
             FlushRender();
         }
 
@@ -273,6 +346,7 @@ namespace SmartWindow
             if (!allowClose && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
+                installationMarqueeTimer.Stop();
                 Hide();
                 return;
             }
@@ -478,23 +552,51 @@ namespace SmartWindow
 
         private void DrawHeader(Graphics graphics)
         {
-            if (logo != null)
-            {
-                DrawLogo(graphics, new Rectangle(34, 27, 50, 50));
-            }
+            DrawLogo(graphics, new Rectangle(34, 27, 50, 50));
 
+            double lightOpacity = Math.Max(
+                0.0,
+                1.0 - logoBlend * 2.0);
+            double darkOpacity = Math.Max(
+                0.0,
+                (logoBlend - 0.5) * 2.0);
+            int lightAlpha = (int)Math.Round(
+                247.0 * lightOpacity);
+            int poweredAlpha = (int)Math.Round(
+                145.0 * darkOpacity);
+            int darkTitleAlpha = (int)Math.Round(
+                247.0 * darkOpacity);
             DrawText(
                 graphics,
                 Localization.Get("appName"),
                 titleFont,
-                new Rectangle(98, 26, 230, 30),
-                Color.FromArgb(247, 246, 242));
+                new Rectangle(98, 28, 300, 48),
+                Color.FromArgb(
+                    lightAlpha,
+                    247,
+                    246,
+                    242),
+                ContentAlignment.MiddleLeft);
             DrawText(
                 graphics,
-                "Sendyun Technology Unit",
-                smallFont,
-                new Rectangle(99, 57, 270, 20),
-                Color.FromArgb(155, 214, 218, 225));
+                "Powered by",
+                microFont,
+                new Rectangle(99, 29, 250, 16),
+                Color.FromArgb(
+                    poweredAlpha,
+                    211,
+                    216,
+                    220));
+            DrawText(
+                graphics,
+                "Sendyun",
+                sectionFont,
+                new Rectangle(98, 45, 250, 27),
+                Color.FromArgb(
+                    darkTitleAlpha,
+                    247,
+                    246,
+                    242));
 
             DrawLanguageButton(
                 graphics,
@@ -600,6 +702,167 @@ namespace SmartWindow
                 sectionFont,
                 new Rectangle(42, 592, 154, 22),
                 Color.FromArgb(235, 245, 243, 237));
+
+            DrawInstallationDayCard(graphics);
+            if (installationTextNeedsScroll &&
+                Visible &&
+                !installationMarqueeTimer.Enabled)
+            {
+                installationMarqueeTimer.Start();
+            }
+        }
+
+        private void DrawInstallationDayCard(Graphics graphics)
+        {
+            Rectangle card = new Rectangle(28, 632, 188, 50);
+            DrawGlassCard(
+                graphics,
+                hoverZone == "installationInfo"
+                    ? "installationInfo"
+                    : "",
+                card);
+            Rectangle textBounds = new Rectangle(
+                card.Left + 13,
+                card.Top + 8,
+                card.Width - 26,
+                card.Height - 16);
+            if (!installationTextNeedsScroll)
+            {
+                DrawText(
+                    graphics,
+                    installationDayText,
+                    microFont,
+                    textBounds,
+                    Color.FromArgb(212, 230, 226, 214),
+                    ContentAlignment.MiddleLeft);
+                return;
+            }
+
+            double cycle = installationTextWidth + 30.0;
+            float offset = (float)(
+                installationMarqueeOffset % Math.Max(1.0, cycle));
+            GraphicsState state = graphics.Save();
+            graphics.SetClip(textBounds);
+            using (SolidBrush brush = new SolidBrush(
+                Color.FromArgb(212, 230, 226, 214)))
+            using (StringFormat format = new StringFormat())
+            {
+                format.FormatFlags = StringFormatFlags.NoWrap;
+                float y = textBounds.Top +
+                    (textBounds.Height - microFont.GetHeight(graphics)) /
+                    2f;
+                graphics.DrawString(
+                    installationDayText,
+                    microFont,
+                    brush,
+                    textBounds.Left - offset,
+                    y,
+                    format);
+                graphics.DrawString(
+                    installationDayText,
+                    microFont,
+                    brush,
+                    textBounds.Left - offset + (float)cycle,
+                    y,
+                    format);
+            }
+            graphics.Restore(state);
+        }
+
+        private void UpdateInstallationDayText()
+        {
+            installationDayText = string.Format(
+                System.Globalization.CultureInfo.CurrentCulture,
+                Localization.Get("installationDay"),
+                installationDays);
+            try
+            {
+                Size measured = TextRenderer.MeasureText(
+                    installationDayText,
+                    microFont,
+                    new Size(int.MaxValue, int.MaxValue),
+                    TextFormatFlags.NoPadding |
+                    TextFormatFlags.SingleLine);
+                installationTextWidth = (int)Math.Ceiling(
+                    measured.Width / Math.Max(1.0, dpiScale));
+            }
+            catch
+            {
+                installationTextWidth =
+                    installationDayText.Length * 10;
+            }
+            installationTextNeedsScroll =
+                installationTextWidth > 162;
+            installationMarqueeOffset = 0.0;
+            if (installationTextNeedsScroll &&
+                Visible &&
+                installationMarqueeTimer != null)
+            {
+                installationMarqueeTimer.Start();
+            }
+            else if (installationMarqueeTimer != null)
+            {
+                installationMarqueeTimer.Stop();
+            }
+        }
+
+        private void ShowInstallationInfo()
+        {
+            System.Globalization.CultureInfo culture;
+            switch (Localization.Current)
+            {
+                case UiLanguage.English:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("en-US");
+                    break;
+                case UiLanguage.Japanese:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("ja-JP");
+                    break;
+                case UiLanguage.Korean:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("ko-KR");
+                    break;
+                case UiLanguage.Russian:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("ru-RU");
+                    break;
+                case UiLanguage.French:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("fr-FR");
+                    break;
+                default:
+                    culture = System.Globalization.CultureInfo
+                        .GetCultureInfo("zh-CN");
+                    break;
+            }
+
+            string message =
+                string.Format(
+                    culture,
+                    Localization.Get("installationFirstDate"),
+                    installationDate.ToString("D", culture)) +
+                Environment.NewLine +
+                string.Format(
+                    culture,
+                    Localization.Get("installationWeekday"),
+                    installationDate.ToString("dddd", culture)) +
+                Environment.NewLine +
+                string.Format(
+                    culture,
+                    Localization.Get("installationCompanionDays"),
+                    installationDays) +
+                Environment.NewLine +
+                string.Format(
+                    culture,
+                    Localization.Get("installationCurrentVersion"),
+                    DisplayVersion);
+            MessageBox.Show(
+                this,
+                message,
+                Localization.Get("installationInfoTitle"),
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
 
         private void DrawDashboard(Graphics graphics)
@@ -998,12 +1261,9 @@ namespace SmartWindow
 
             Rectangle card = new Rectangle(left, 195, 700, 338);
             DrawGlassCard(graphics, "authorPage", card);
-            if (logo != null)
-            {
-                DrawLogo(
-                    graphics,
-                    new Rectangle(left + 28, card.Top + 28, 82, 82));
-            }
+            DrawLogo(
+                graphics,
+                new Rectangle(left + 28, card.Top + 28, 82, 82));
             DrawText(
                 graphics,
                 Localization.Get("appName"),
@@ -1520,11 +1780,53 @@ namespace SmartWindow
 
         private void DrawLogo(Graphics graphics, Rectangle bounds)
         {
-            if (logo == null)
+            using (GraphicsPath path = RoundedRectangle(
+                bounds,
+                Math.Max(4, bounds.Width / 7)))
+            {
+                GraphicsState state = graphics.Save();
+                graphics.SetClip(path);
+                DrawBitmapFade(
+                    graphics,
+                    logoLight,
+                    bounds,
+                    1.0 - logoBlend);
+                DrawBitmapFade(
+                    graphics,
+                    logoDark,
+                    bounds,
+                    logoBlend);
+                graphics.Restore(state);
+            }
+        }
+
+        private static void DrawBitmapFade(
+            Graphics graphics,
+            Bitmap bitmap,
+            Rectangle bounds,
+            double opacity)
+        {
+            if (bitmap == null || opacity <= 0.002)
             {
                 return;
             }
-            graphics.DrawImage(logo, bounds);
+            ColorMatrix matrix = new ColorMatrix();
+            matrix.Matrix33 = (float)Math.Max(
+                0.0,
+                Math.Min(1.0, opacity));
+            using (ImageAttributes attributes = new ImageAttributes())
+            {
+                attributes.SetColorMatrix(matrix);
+                graphics.DrawImage(
+                    bitmap,
+                    bounds,
+                    0,
+                    0,
+                    bitmap.Width,
+                    bitmap.Height,
+                    GraphicsUnit.Pixel,
+                    attributes);
+            }
         }
 
         private void DrawText(
@@ -1611,8 +1913,10 @@ namespace SmartWindow
                 zone.StartsWith("language:", StringComparison.Ordinal) ||
                 zone == "close" ||
                 zone == "minimize" ||
+                zone == "logo" ||
                 zone == "navDashboard" ||
                 zone == "navAuthor" ||
+                zone == "installationInfo" ||
                 zone == "author" ||
                 zone == "sponsor" ||
                 zone == "scrollbar" ||
@@ -1748,6 +2052,18 @@ namespace SmartWindow
             {
                 Hide();
             }
+            else if (zone == "logo")
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(
+                        "https://cnsendyun.com");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Write("Open official website: " + exception);
+                }
+            }
             else if (zone == "minimize")
             {
                 WindowState = FormWindowState.Minimized;
@@ -1762,7 +2078,15 @@ namespace SmartWindow
             {
                 authorPage = true;
                 contentScroll = 0.0;
+                if (installationTextNeedsScroll && Visible)
+                {
+                    installationMarqueeTimer.Start();
+                }
                 RequestRender();
+            }
+            else if (zone == "installationInfo")
+            {
+                ShowInstallationInfo();
             }
             else if (zone == "notification")
             {
@@ -1937,6 +2261,10 @@ namespace SmartWindow
             {
                 return "language";
             }
+            if (new Rectangle(34, 27, 50, 50).Contains(point))
+            {
+                return "logo";
+            }
             if (new Rectangle(928, 28, 34, 30).Contains(point))
             {
                 return "close";
@@ -1970,6 +2298,10 @@ namespace SmartWindow
                 point.X,
                 point.Y + (int)Math.Round(contentScroll));
 
+            if (new Rectangle(28, 632, 188, 50).Contains(point))
+            {
+                return "installationInfo";
+            }
             if (authorPage)
             {
                 if (new Rectangle(274, 434, 360, 32).Contains(contentPoint))
@@ -2244,6 +2576,12 @@ namespace SmartWindow
                 renderTimer.Dispose();
                 hoverRenderTimer.Stop();
                 hoverRenderTimer.Dispose();
+                logoTimer.Stop();
+                logoTimer.Dispose();
+                logoTransitionTimer.Stop();
+                logoTransitionTimer.Dispose();
+                installationMarqueeTimer.Stop();
+                installationMarqueeTimer.Dispose();
                 if (surfaceGraphics != null)
                 {
                     surfaceGraphics.Dispose();
@@ -2254,9 +2592,13 @@ namespace SmartWindow
                     surface.Dispose();
                     surface = null;
                 }
-                if (logo != null)
+                if (logoLight != null)
                 {
-                    logo.Dispose();
+                    logoLight.Dispose();
+                }
+                if (logoDark != null)
+                {
+                    logoDark.Dispose();
                 }
                 if (githubLogo != null)
                 {

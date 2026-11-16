@@ -16,7 +16,8 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "/win32manifest:$sourceRoot\app.manifest" `
     "/win32icon:$outputRoot\SmartWindow.ico" `
     "/out:$outputRoot\SmartWindow.exe" `
-    "/resource:$outputRoot\logo.png,SmartWindow.Resources.logo.png" `
+    "/resource:$outputRoot\logo-light.png,SmartWindow.Resources.logo-light.png" `
+    "/resource:$outputRoot\logo-dark.png,SmartWindow.Resources.logo-dark.png" `
     "/resource:$outputRoot\github.png,SmartWindow.Resources.github.png" `
     "/resource:$outputRoot\donation-alipay.jpg,SmartWindow.Resources.donation-alipay.jpg" `
     "/resource:$outputRoot\donation-wechat.jpg,SmartWindow.Resources.donation-wechat.jpg" `

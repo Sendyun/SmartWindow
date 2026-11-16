@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $msixRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $projectRoot = Split-Path -Parent $msixRoot
 $staging = Join-Path $msixRoot "staging"
-$output = Join-Path $projectRoot "SmartWindow_1.1.0.0_x64.msix"
+$output = Join-Path $projectRoot "SmartWindow_1.1.2.0_x64.msix"
 
 function Find-SdkTool([string]$name) {
     $roots = @(
@@ -112,12 +112,12 @@ if (Test-Path -LiteralPath $uploadDirectory) {
 }
 New-Item -ItemType Directory -Path $uploadDirectory | Out-Null
 Copy-Item -LiteralPath $output -Destination $uploadDirectory
-$uploadArchive = Join-Path $projectRoot "SmartWindow_1.1.0.0_x64.msixupload"
+$uploadArchive = Join-Path $projectRoot "SmartWindow_1.1.2.0_x64.msixupload"
 if (Test-Path -LiteralPath $uploadArchive) {
     Remove-Item -LiteralPath $uploadArchive -Force
 }
 Compress-Archive `
-    -LiteralPath (Join-Path $uploadDirectory "SmartWindow_1.1.0.0_x64.msix") `
+    -LiteralPath (Join-Path $uploadDirectory "SmartWindow_1.1.2.0_x64.msix") `
     -DestinationPath ($uploadArchive + ".zip") `
     -CompressionLevel Optimal
 Move-Item `

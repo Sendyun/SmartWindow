@@ -710,14 +710,21 @@ namespace SmartWindow
             if (currentIsMedia && current != null)
             {
                 bool wasPaused = musicPaused;
+                bool yieldingToNotification =
+                    phase == VisualPhase.Collapsing &&
+                    musicEnding &&
+                    queue.Count > 0;
                 musicPaused = false;
                 musicPauseEndPending = false;
                 waveformMotionTarget = 1.0;
-                if (wasPaused || phase == VisualPhase.Collapsing)
+                if (wasPaused ||
+                    (phase == VisualPhase.Collapsing &&
+                     !yieldingToNotification))
                 {
                     CancelQueuedAction();
                 }
-                if (phase == VisualPhase.Collapsing)
+                if (phase == VisualPhase.Collapsing &&
+                    !yieldingToNotification)
                 {
                     musicEnding = false;
                     phase = VisualPhase.Music;

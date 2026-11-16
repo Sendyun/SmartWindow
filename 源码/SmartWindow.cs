@@ -1541,6 +1541,7 @@ namespace SmartWindow
         private string dockEdge = "top";
         private int dockPosition = 1;
         private string dockScreen = "";
+        private DateTime installedAt = DateTime.Today;
         private string screenSignature = "";
         private bool displaySuppressed;
         private bool safeMode;
@@ -1571,6 +1572,7 @@ namespace SmartWindow
             fullscreenDetector = new FullscreenDetector();
             LoadNotificationHistory();
             LoadFilteredApps();
+            installedAt = ReadInstallDate();
             Localization.SetLanguage(ReadLanguage());
             transparentWindow = ReadTransparentWindow();
             qualityEnhancement =
@@ -1963,6 +1965,7 @@ namespace SmartWindow
                 CheckRuntimeHealth();
             };
             healthTimer.Start();
+            SaveSettings();
         }
 
         private void CheckRuntimeHealth()
@@ -2276,6 +2279,7 @@ namespace SmartWindow
             dockEdge = ReadDockEdge();
             dockPosition = ReadDockPosition();
             dockScreen = ReadStringSetting("dockScreen");
+            installedAt = ReadInstallDate();
             LoadFilteredApps();
             musicModeItem.Checked = musicMode;
             musicPersistentItem.Checked = musicPersistent;
@@ -2370,7 +2374,8 @@ namespace SmartWindow
                     Localization.Get(
                         paused ? "statusPaused" : "statusRunning"),
                 uiScale,
-                consoleOpacity);
+                consoleOpacity,
+                installedAt);
         }
 
         private void RefreshLocalizedText()
@@ -2885,6 +2890,54 @@ namespace SmartWindow
             return 1;
         }
 
+        private DateTime ReadInstallDate()
+        {
+            try
+            {
+                if (File.Exists(settingsPath))
+                {
+                    string[] lines = File.ReadAllLines(
+                        settingsPath,
+                        Encoding.UTF8);
+                    for (int index = 0; index < lines.Length; index++)
+                    {
+                        string line = lines[index].Trim();
+                        if (line.StartsWith(
+                            "installDate=",
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            DateTime stored;
+                            if (DateTime.TryParseExact(
+                                line.Substring("installDate=".Length),
+                                "yyyy-MM-dd",
+                                System.Globalization.CultureInfo.InvariantCulture,
+                                System.Globalization.DateTimeStyles.None,
+                                out stored))
+                            {
+                                return stored.Date <= DateTime.Today
+                                    ? stored.Date
+                                    : DateTime.Today;
+                            }
+                        }
+                    }
+
+                    DateTime created = File
+                        .GetCreationTimeUtc(settingsPath)
+                        .ToLocalTime()
+                        .Date;
+                    if (created <= DateTime.Today)
+                    {
+                        return created;
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadInstallDate: " + exception);
+            }
+            return DateTime.Today;
+        }
+
         private double ReadConsoleOpacity()
         {
             try
@@ -2965,6 +3018,11 @@ namespace SmartWindow
                     Environment.NewLine +
                     "dockScreen=" +
                     (dockScreen ?? "") +
+                    Environment.NewLine +
+                    "installDate=" +
+                    installedAt.ToString(
+                        "yyyy-MM-dd",
+                        System.Globalization.CultureInfo.InvariantCulture) +
                     Environment.NewLine +
                     "filteredApps=" +
                     EncodeFilteredApps() +

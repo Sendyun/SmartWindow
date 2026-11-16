@@ -93,21 +93,16 @@ namespace SmartWindow
                 GraphicsUnit.Pixel);
         }
 
-        public static Bitmap LoadLogo()
+        public static Bitmap LoadLogoLight()
         {
-            Assembly assembly = Assembly.GetExecutingAssembly();
-            using (Stream stream = assembly.GetManifestResourceStream(
-                "SmartWindow.Resources.logo.png"))
-            {
-                if (stream == null)
-                {
-                    return null;
-                }
-                using (Image source = Image.FromStream(stream))
-                {
-                    return new Bitmap(source);
-                }
-            }
+            return LoadBitmapResource(
+                "SmartWindow.Resources.logo-light.png");
+        }
+
+        public static Bitmap LoadLogoDark()
+        {
+            return LoadBitmapResource(
+                "SmartWindow.Resources.logo-dark.png");
         }
 
         public static Bitmap LoadGithubLogo()
