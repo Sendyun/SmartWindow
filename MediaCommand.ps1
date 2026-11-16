@@ -1,7 +1,8 @@
 param(
-    [ValidateSet("toggle", "previous", "next")]
+    [ValidateSet("toggle", "previous", "next", "seek")]
     [string]$Action = "toggle",
     [string]$AppIdMatch = "",
+    [double]$PositionSeconds = 0,
     [switch]$Server,
     [int]$ParentPid = 0
 )
@@ -30,7 +31,8 @@ function Await-WinRt($operation, [Type]$resultType) {
 
 function Invoke-MediaAction(
     [string]$RequestedAction,
-    [string]$RequestedAppId
+    [string]$RequestedAppId,
+    [double]$RequestedPositionSeconds
 ) {
     if ($null -eq $script:mediaManager) {
         $script:mediaManager = Await-WinRt `
@@ -61,7 +63,14 @@ function Invoke-MediaAction(
         return $false
     }
 
-    if ($RequestedAction -eq "previous") {
+    if ($RequestedAction -eq "seek") {
+        $positionTicks = [long](
+            [math]::Max(0, $RequestedPositionSeconds) * 10000000
+        )
+        $operation = $session.TryChangePlaybackPositionAsync(
+            $positionTicks)
+    }
+    elseif ($RequestedAction -eq "previous") {
         $operation = $session.TrySkipPreviousAsync()
     }
     elseif ($RequestedAction -eq "next") {
@@ -74,7 +83,7 @@ function Invoke-MediaAction(
 }
 
 if (-not $Server) {
-    $result = Invoke-MediaAction $Action $AppIdMatch
+    $result = Invoke-MediaAction $Action $AppIdMatch $PositionSeconds
     [Console]::Out.WriteLine($result)
     exit
 }
@@ -134,6 +143,15 @@ try {
                 try {
                     $parts = $line.Split([char]9, 2)
                     $requestedAction = $parts[0]
+                    $requestedPositionSeconds = 0.0
+                    if ($requestedAction.StartsWith("seek:")) {
+                        [void][double]::TryParse(
+                            $requestedAction.Substring(5),
+                            [System.Globalization.NumberStyles]::Float,
+                            [System.Globalization.CultureInfo]::InvariantCulture,
+                            [ref]$requestedPositionSeconds)
+                        $requestedAction = "seek"
+                    }
                     $requestedAppId = ""
                     if ($parts.Length -gt 1 -and
                         -not [string]::IsNullOrWhiteSpace($parts[1])) {
@@ -143,7 +161,8 @@ try {
                     }
                     $result = Invoke-MediaAction `
                         $requestedAction `
-                        $requestedAppId
+                        $requestedAppId `
+                        $requestedPositionSeconds
                 }
                 catch {
                     [Console]::Error.WriteLine($_.Exception.Message)
@@ -154,10 +173,22 @@ try {
             }
         }
         finally {
-            $reader.Dispose()
-            $writer.Dispose()
-            if ($pipe.IsConnected) {
-                $pipe.Disconnect()
+            try {
+                $reader.Dispose()
+            }
+            catch {
+            }
+            try {
+                $writer.Dispose()
+            }
+            catch {
+            }
+            try {
+                if ($pipe.IsConnected) {
+                    $pipe.Disconnect()
+                }
+            }
+            catch {
             }
         }
     }

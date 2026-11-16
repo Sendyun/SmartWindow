@@ -12,7 +12,7 @@ namespace SmartWindow
         private const int LogicalWidth = 1000;
         private const int LogicalHeight = 720;
         private const int HeaderHeight = 92;
-        private const string DisplayVersion = "Ver 1.0.1";
+        private const string DisplayVersion = "Ver 1.1.0";
 
         private readonly Bitmap logo;
         private readonly Bitmap githubLogo;
@@ -39,6 +39,8 @@ namespace SmartWindow
         private bool transparentWindow;
         private bool qualityEnhancement;
         private bool autoStart;
+        private bool movementEnabled;
+        private bool clickThroughEnabled;
         private double sizeScale = 1.0;
         private double consoleOpacity = 0.5;
         private string runtimeStatus = Localization.Get("statusRunning");
@@ -52,8 +54,16 @@ namespace SmartWindow
         public event EventHandler GlassModeToggleRequested;
         public event EventHandler QualityEnhanceToggleRequested;
         public event EventHandler AutoStartToggleRequested;
+        public event EventHandler WindowMovementToggleRequested;
+        public event EventHandler ClickThroughToggleRequested;
         public event EventHandler TestNotificationRequested;
         public event EventHandler SettingsRequested;
+        public event EventHandler NotificationHistoryRequested;
+        public event EventHandler AppFiltersRequested;
+        public event EventHandler ExportSettingsRequested;
+        public event EventHandler ImportSettingsRequested;
+        public event EventHandler ResetSettingsRequested;
+        public event EventHandler SponsorRequested;
         public event EventHandler ExitRequested;
         public event EventHandler<UiLanguage> LanguageChangeRequested;
         public event EventHandler<double> SizeScaleChanged;
@@ -116,6 +126,8 @@ namespace SmartWindow
             bool isTransparent,
             bool isQualityEnhanced,
             bool isAutoStart,
+            bool isMovementEnabled,
+            bool isClickThrough,
             string status,
             double scale,
             double opacity)
@@ -126,6 +138,8 @@ namespace SmartWindow
             transparentWindow = isTransparent;
             qualityEnhancement = isQualityEnhanced;
             autoStart = isAutoStart;
+            movementEnabled = isMovementEnabled;
+            clickThroughEnabled = isClickThrough;
             sizeScale = Math.Max(0.80, Math.Min(1.20, scale));
             consoleOpacity = Math.Max(0.0, Math.Min(1.0, opacity));
             if (!string.IsNullOrWhiteSpace(status))
@@ -177,6 +191,26 @@ namespace SmartWindow
             }
         }
 
+        protected override void WndProc(ref Message message)
+        {
+            if (message.Msg == 0x0201) // WM_LBUTTONDOWN
+            {
+                int packed = message.LParam.ToInt32();
+                int x = (short)(packed & 0xFFFF);
+                int y = (short)((packed >> 16) & 0xFFFF);
+                string zone = HitZone(ToLogical(new Point(x, y)));
+                if (zone == "sponsor")
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        Raise(SponsorRequested);
+                    }));
+                    return;
+                }
+            }
+            base.WndProc(ref message);
+        }
+
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
@@ -195,6 +229,20 @@ namespace SmartWindow
                 area.Left + (area.Width - Width) / 2,
                 area.Top + (area.Height - Height) / 2);
             RecreateSurface();
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+            dpiScale = Math.Max(1f, e.DeviceDpiNew / 96f);
+            Width = (int)Math.Round(LogicalWidth * dpiScale);
+            Height = (int)Math.Round(LogicalHeight * dpiScale);
+            Rectangle area = Screen.FromControl(this).WorkingArea;
+            Location = new Point(
+                area.Left + (area.Width - Width) / 2,
+                area.Top + (area.Height - Height) / 2);
+            RecreateSurface();
+            FlushRender();
         }
 
         private void RecreateSurface()
@@ -478,8 +526,7 @@ namespace SmartWindow
                 Localization.Get("aboutAuthor"),
                 "navAuthor",
                 authorPage);
-
-            float y = 250;
+            float y = 304;
             DrawText(
                 graphics,
                 Localization.Get("runtimeStatus"),
@@ -505,20 +552,26 @@ namespace SmartWindow
                 graphics,
                 Localization.Get("shortcuts"),
                 microFont,
-                new Rectangle(34, 332, 140, 18),
+                new Rectangle(34, 382, 140, 18),
                 Color.FromArgb(120, 220, 220, 218));
             DrawShortcut(
                 graphics,
                 34,
-                358,
+                408,
                 "Ctrl + M",
                 Localization.Get("shortcutMusic"));
             DrawShortcut(
                 graphics,
                 34,
-                396,
+                440,
                 "Ctrl + M + L",
                 Localization.Get("shortcutPersistent"));
+            DrawShortcut(
+                graphics,
+                34,
+                472,
+                "Ctrl + Alt + N",
+                Localization.Get("shortcutHistory"));
 
             Rectangle authorCard = new Rectangle(28, 568, 188, 52);
             using (GraphicsPath path = RoundedRectangle(authorCard, 12))
@@ -635,22 +688,75 @@ namespace SmartWindow
                     : Localization.Get("autoStartOff"),
                 autoStart);
 
+            DrawSettingCard(
+                graphics,
+                "movement",
+                new Rectangle(left, 1019, width, 92),
+                Localization.Get("windowMovement"),
+                movementEnabled
+                    ? Localization.Get("windowMovementOn")
+                    : Localization.Get("windowMovementOff"),
+                movementEnabled);
+
+            DrawSettingCard(
+                graphics,
+                "clickThrough",
+                new Rectangle(left, 1122, width, 92),
+                Localization.Get("antiOcclusion"),
+                clickThroughEnabled
+                    ? Localization.Get("antiOcclusionOn")
+                    : Localization.Get("antiOcclusionOff"),
+                clickThroughEnabled);
+
             DrawActionButton(
                 graphics,
                 "test",
-                new Rectangle(left, 1023, 202, 48),
+                new Rectangle(left, 1229, 202, 48),
                 Localization.Get("testNotification"),
                 true);
             DrawActionButton(
                 graphics,
-                "restore",
-                new Rectangle(left + 218, 1023, 202, 48),
-                Localization.Get("notificationSettings"),
+                "history",
+                new Rectangle(left + 218, 1229, 202, 48),
+                Localization.Get("notificationHistory"),
                 false);
             DrawActionButton(
                 graphics,
+                "filters",
+                new Rectangle(left + 436, 1229, 202, 48),
+                Localization.Get("appFilters"),
+                false);
+
+            int utilityWidth = 166;
+            DrawActionButton(
+                graphics,
+                "export",
+                new Rectangle(left, 1289, utilityWidth, 46),
+                Localization.Get("exportSettings"),
+                false);
+            DrawActionButton(
+                graphics,
+                "import",
+                new Rectangle(left + 178, 1289, utilityWidth, 46),
+                Localization.Get("importSettings"),
+                false);
+            DrawActionButton(
+                graphics,
+                "reset",
+                new Rectangle(left + 356, 1289, utilityWidth, 46),
+                Localization.Get("resetSettings"),
+                false);
+            DrawActionButton(
+                graphics,
+                "restore",
+                new Rectangle(left + 534, 1289, utilityWidth, 46),
+                Localization.Get("notificationSettings"),
+                false);
+
+            DrawActionButton(
+                graphics,
                 "exit",
-                new Rectangle(left + 436, 1023, 202, 48),
+                new Rectangle(left, 1347, 202, 46),
                 Localization.Get("exitApp"),
                 false);
 
@@ -658,7 +764,7 @@ namespace SmartWindow
                 graphics,
                 Localization.Get("footerHint"),
                 smallFont,
-                new Rectangle(left, 1087, width, 24),
+                new Rectangle(left, 1412, width, 24),
                 Color.FromArgb(122, 211, 211, 206));
         }
 
@@ -972,12 +1078,99 @@ namespace SmartWindow
                     githubButton);
             }
 
+            Rectangle sponsorButton = new Rectangle(
+                card.Right - 208,
+                card.Top + 255,
+                180,
+                40);
+            using (GraphicsPath path = RoundedRectangle(
+                sponsorButton,
+                20))
+            using (SolidBrush fill = new SolidBrush(
+                Color.FromArgb(
+                    hoverZone == "sponsor" ? 54 : 28,
+                    222,
+                    185,
+                    116)))
+            using (Pen border = new Pen(
+                Color.FromArgb(
+                    hoverZone == "sponsor" ? 140 : 72,
+                    236,
+                    203,
+                    139),
+                1f))
+            {
+                graphics.FillPath(fill, path);
+                graphics.DrawPath(border, path);
+            }
+            DrawCoffeeCup(
+                graphics,
+                new Rectangle(
+                    sponsorButton.Left + 14,
+                    sponsorButton.Top + 9,
+                    20,
+                    22),
+                Color.FromArgb(235, 238, 207, 151));
+            DrawText(
+                graphics,
+                Localization.Get("sponsorCoffeeButton"),
+                smallFont,
+                new Rectangle(
+                    sponsorButton.Left + 40,
+                    sponsorButton.Top,
+                    sponsorButton.Width - 48,
+                    sponsorButton.Height),
+                Color.FromArgb(240, 239, 226, 196),
+                ContentAlignment.MiddleLeft);
+
             DrawText(
                 graphics,
                 Localization.Get("emailHint"),
                 smallFont,
-                new Rectangle(left + 28, card.Top + 301, 500, 22),
+                new Rectangle(left + 28, card.Top + 301, 440, 22),
                 Color.FromArgb(120, 206, 208, 206));
+        }
+
+        private static void DrawCoffeeCup(
+            Graphics graphics,
+            Rectangle bounds,
+            Color color)
+        {
+            using (Pen pen = new Pen(color, 1.5f))
+            {
+                Rectangle cup = new Rectangle(
+                    bounds.Left + 1,
+                    bounds.Top + 6,
+                    bounds.Width - 7,
+                    bounds.Height - 9);
+                graphics.DrawRectangle(pen, cup);
+                graphics.DrawArc(
+                    pen,
+                    bounds.Right - 10,
+                    bounds.Top + 9,
+                    9,
+                    11,
+                    -90,
+                    180);
+                graphics.DrawLine(
+                    pen,
+                    bounds.Left + 4,
+                    bounds.Bottom - 1,
+                    bounds.Right - 8,
+                    bounds.Bottom - 1);
+                graphics.DrawLine(
+                    pen,
+                    bounds.Left + 6,
+                    bounds.Top + 1,
+                    bounds.Left + 6,
+                    bounds.Top + 5);
+                graphics.DrawLine(
+                    pen,
+                    bounds.Left + 11,
+                    bounds.Top,
+                    bounds.Left + 11,
+                    bounds.Top + 4);
+            }
         }
 
         private void DrawGlassCard(
@@ -1267,7 +1460,7 @@ namespace SmartWindow
             }
         }
 
-        private const double MaxContentScroll = 440.0;
+        private const double MaxContentScroll = 760.0;
 
         private Rectangle ScrollTrackBounds
         {
@@ -1421,8 +1614,14 @@ namespace SmartWindow
                 zone == "navDashboard" ||
                 zone == "navAuthor" ||
                 zone == "author" ||
+                zone == "sponsor" ||
                 zone == "scrollbar" ||
                 zone == "test" ||
+                zone == "history" ||
+                zone == "filters" ||
+                zone == "export" ||
+                zone == "import" ||
+                zone == "reset" ||
                 zone == "restore" ||
                 zone == "exit" ||
                 zone == "email";
@@ -1431,6 +1630,13 @@ namespace SmartWindow
         private void OnConsoleMouseDown(object sender, MouseEventArgs e)
         {
             Point logical = ToLogical(e.Location);
+            if (e.Button == MouseButtons.Left &&
+                authorPage &&
+                HitZone(logical) == "sponsor")
+            {
+                Raise(SponsorRequested);
+                return;
+            }
             if (e.Button == MouseButtons.Left &&
                 new Rectangle(
                     ScrollTrackBounds.Left - 4,
@@ -1585,9 +1791,37 @@ namespace SmartWindow
             {
                 Raise(AutoStartToggleRequested);
             }
+            else if (zone == "movement")
+            {
+                Raise(WindowMovementToggleRequested);
+            }
+            else if (zone == "clickThrough")
+            {
+                Raise(ClickThroughToggleRequested);
+            }
             else if (zone == "test")
             {
                 Raise(TestNotificationRequested);
+            }
+            else if (zone == "history")
+            {
+                Raise(NotificationHistoryRequested);
+            }
+            else if (zone == "filters")
+            {
+                Raise(AppFiltersRequested);
+            }
+            else if (zone == "export")
+            {
+                Raise(ExportSettingsRequested);
+            }
+            else if (zone == "import")
+            {
+                Raise(ImportSettingsRequested);
+            }
+            else if (zone == "reset")
+            {
+                Raise(ResetSettingsRequested);
             }
             else if (zone == "restore")
             {
@@ -1746,6 +1980,10 @@ namespace SmartWindow
                 {
                     return "github";
                 }
+                if (new Rectangle(710, 420, 236, 112).Contains(contentPoint))
+                {
+                    return "sponsor";
+                }
                 return "";
             }
 
@@ -1781,15 +2019,43 @@ namespace SmartWindow
             {
                 return "autoStart";
             }
-            if (new Rectangle(246, 1023, 202, 48).Contains(contentPoint))
+            if (new Rectangle(246, 1019, 700, 92).Contains(contentPoint))
+            {
+                return "movement";
+            }
+            if (new Rectangle(246, 1122, 700, 92).Contains(contentPoint))
+            {
+                return "clickThrough";
+            }
+            if (new Rectangle(246, 1229, 202, 48).Contains(contentPoint))
             {
                 return "test";
             }
-            if (new Rectangle(464, 1023, 202, 48).Contains(contentPoint))
+            if (new Rectangle(464, 1229, 202, 48).Contains(contentPoint))
+            {
+                return "history";
+            }
+            if (new Rectangle(682, 1229, 202, 48).Contains(contentPoint))
+            {
+                return "filters";
+            }
+            if (new Rectangle(246, 1289, 166, 46).Contains(contentPoint))
+            {
+                return "export";
+            }
+            if (new Rectangle(424, 1289, 166, 46).Contains(contentPoint))
+            {
+                return "import";
+            }
+            if (new Rectangle(602, 1289, 166, 46).Contains(contentPoint))
+            {
+                return "reset";
+            }
+            if (new Rectangle(780, 1289, 166, 46).Contains(contentPoint))
             {
                 return "restore";
             }
-            if (new Rectangle(682, 1023, 202, 48).Contains(contentPoint))
+            if (new Rectangle(246, 1347, 202, 46).Contains(contentPoint))
             {
                 return "exit";
             }

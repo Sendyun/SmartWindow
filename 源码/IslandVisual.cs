@@ -25,7 +25,22 @@ namespace SmartWindow
         private const int DetailHeight = 92;
         private const int MusicWidth = 380;
         private const int MusicHeight = 62;
-        private const int MusicExpandedHeight = 152;
+        private const int MusicExpandedHeight = 222;
+        private const int SideCompactWidth = 210;
+        private const int SideCompactHeight = 120;
+        private const int SideDetailWidth = 300;
+        private const int SideDetailHeight = 178;
+        private const int SideMusicWidth = 300;
+        private const int SideMusicHeight = 190;
+        private const int SideMusicExpandedHeight = 356;
+
+        private enum DockEdge
+        {
+            Top,
+            Bottom,
+            Left,
+            Right
+        }
 
         private enum VisualPhase
         {
@@ -43,6 +58,7 @@ namespace SmartWindow
         private readonly System.Threading.Timer controlsTimer;
         private readonly object sequenceSync = new object();
         private readonly GlobalMouseHook mouseHook;
+        private readonly DockPreviewForm dockPreview;
         private Font microFont;
         private Font titleFont;
         private Font bodyFont;
@@ -51,7 +67,12 @@ namespace SmartWindow
             new ManualResetEvent(false);
 
         public event EventHandler<MediaCommandAction> MediaCommandRequested;
+        public event EventHandler<double> VolumeChangeRequested;
+        public event EventHandler<double> SeekRequested;
+        public event EventHandler SoundSettingsRequested;
+        public event EventHandler MediaSourceOpenRequested;
         public event EventHandler MusicWindowCloseRequested;
+        public event EventHandler DockEdgeChanged;
 
         private NotificationItem current;
         private VisualPhase phase = VisualPhase.Hidden;
@@ -71,13 +92,16 @@ namespace SmartWindow
         private Thread frameThread;
         private int frameMessagePending;
         private volatile bool frameClockRunning;
-        private Bitmap layeredBitmap;
         private Graphics layeredGraphics;
+        private IntPtr layeredMemoryDc;
+        private IntPtr layeredDib;
+        private IntPtr layeredOriginalBitmap;
+        private int layeredSurfaceWidth;
+        private int layeredSurfaceHeight;
         private bool renderingLayered;
-        private bool hovering;
         private bool paused;
         private double userScale = 1.0;
-        private float baseFontDpi;
+        private float baseFontDpi = 96f;
         private bool glassModeEnabled;
         private double glassBlend;
         private double glassBlendVelocity;
@@ -88,6 +112,22 @@ namespace SmartWindow
         private double qualityBlendTarget;
         private double qualityParticleSeconds;
         private double collapseDissolveProgress;
+        private DateTime notificationCollapseAt = DateTime.MaxValue;
+        private bool movementEnabled;
+        private bool clickThroughEnabled;
+        private bool draggingWindow;
+        private bool dragMoved;
+        private bool mouseDownForDrag;
+        private bool snappingToDock;
+        private Point dragStartScreen;
+        private Point dragLastScreen;
+        private Point dragGrabOffset;
+        private DockEdge dockEdge = DockEdge.Top;
+        private int dockPosition = 1;
+        private string dockScreenDevice = "";
+        private double dockSnapBlend = 1.0;
+        private double dockSnapVelocity;
+        private DateTime suppressClickUntil = DateTime.MinValue;
         private bool musicModeEnabled;
         private bool musicPinned;
         private bool currentIsMedia;
@@ -96,22 +136,32 @@ namespace SmartWindow
         private bool musicPaused;
         private bool musicPauseEndPending;
         private bool musicControlsVisible;
+        private bool draggingVolume;
         private int hoveredMusicButton = -1;
         private MediaPlaybackState mediaState;
         private Image albumArtwork;
         private string albumArtworkPath;
-        private DateTime albumArtworkStamp;
+        private string albumArtworkSignature;
+        private string pendingArtworkPath;
+        private string pendingArtworkSignature;
+        private int artworkRequestGeneration;
+        private bool artworkLoadInProgress;
+        private DateTime artworkRetryAfter = DateTime.MinValue;
         private Color musicAccent = Color.FromArgb(240, 218, 151);
         private double waveformMotion = 1.0;
         private double waveformMotionVelocity;
         private double waveformMotionTarget = 1.0;
         private double waveformSeconds;
+        private double volumeLevel = 0.5;
         private Action queuedAction;
         private int sequenceGeneration;
+        private bool resourcesDisposed;
 
         private const uint FrameMessage =
             0x8000 + 0x173;
-        private const double TargetFrameRate = 165.0;
+        private const int ActiveFrameRate = 165;
+        private const int IdleFrameRate = 30;
+        private int requestedFrameRate = ActiveFrameRate;
 
         public IslandForm()
         {
@@ -123,10 +173,6 @@ namespace SmartWindow
             BackColor = Color.FromArgb(14, 14, 16);
             DoubleBuffered = true;
             AutoScaleMode = AutoScaleMode.None;
-            Width = Scale(SeedSize);
-            Height = Scale(SeedSize);
-            Cursor = Cursors.Hand;
-            Opacity = 1.0;
 
             float fontDpi;
             using (Graphics graphics = CreateGraphics())
@@ -134,6 +180,11 @@ namespace SmartWindow
                 fontDpi = graphics.DpiX;
             }
             baseFontDpi = fontDpi;
+            Width = Scale(SeedSize);
+            Height = Scale(SeedSize);
+            Cursor = Cursors.Hand;
+            Opacity = 1.0;
+
             CreateFonts(fontDpi * (float)userScale);
 
             sequenceTimer = new System.Threading.Timer(
@@ -148,20 +199,21 @@ namespace SmartWindow
                 Timeout.Infinite,
                 Timeout.Infinite);
             mouseHook = new GlobalMouseHook(OnGlobalMouseDown);
+            dockPreview = new DockPreviewForm();
 
             MouseEnter += delegate
             {
-                hovering = true;
                 RequestRender();
             };
             MouseLeave += delegate
             {
-                hovering = false;
                 RequestRender();
             };
             MouseClick += OnIslandClick;
             MouseDoubleClick += OnIslandDoubleClick;
+            MouseDown += OnIslandMouseDown;
             MouseMove += OnIslandMouseMove;
+            MouseUp += OnIslandMouseUp;
         }
 
         protected override bool ShowWithoutActivation
@@ -177,6 +229,10 @@ namespace SmartWindow
                 parameters.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
                 parameters.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW
                 parameters.ExStyle |= 0x00080000; // WS_EX_LAYERED
+                if (clickThroughEnabled)
+                {
+                    parameters.ExStyle |= 0x00000020; // WS_EX_TRANSPARENT
+                }
                 return parameters;
             }
         }
@@ -213,6 +269,7 @@ namespace SmartWindow
                 current = null;
                 currentIsMedia = false;
                 musicControlsVisible = false;
+                CancelNotificationCollapse();
                 phase = VisualPhase.Hidden;
                 Hide();
             }
@@ -223,6 +280,14 @@ namespace SmartWindow
                 phase == VisualPhase.Hidden)
             {
                 StartMusic();
+            }
+        }
+
+        public void DismissNotificationForPolicy()
+        {
+            if (current != null && !currentIsMedia)
+            {
+                DismissCurrent();
             }
         }
 
@@ -317,25 +382,29 @@ namespace SmartWindow
             else if (currentIsMedia)
             {
                 SetSpringTarget(
-                    Scale(MusicWidth),
+                    MusicTargetWidth,
                     Scale(musicControlsVisible
-                        ? MusicExpandedHeight
-                        : MusicHeight),
+                        ? (SideDocked
+                            ? SideMusicExpandedHeight
+                            : MusicExpandedHeight)
+                        : (SideDocked
+                            ? SideMusicHeight
+                            : MusicHeight)),
                     0.0);
             }
             else
             {
                 int width = phase == VisualPhase.Detail
-                    ? DetailWidth
+                    ? NotificationTargetWidth(false)
                     : (phase == VisualPhase.Compact
-                        ? CompactWidth
-                        : SeedSize);
+                        ? NotificationTargetWidth(true)
+                        : Scale(SeedSize));
                 int height = phase == VisualPhase.Detail
-                    ? DetailHeight
+                    ? NotificationTargetHeight(false)
                     : (phase == VisualPhase.Compact
-                        ? CompactHeight
-                        : SeedSize);
-                SetSpringTarget(Scale(width), Scale(height), detailBlendTarget);
+                        ? NotificationTargetHeight(true)
+                        : Scale(SeedSize));
+                SetSpringTarget(width, height, detailBlendTarget);
             }
             RequestRender();
         }
@@ -373,6 +442,184 @@ namespace SmartWindow
             }
             StartFrameClock();
             RequestRender();
+        }
+
+        public void SetVolume(double value)
+        {
+            volumeLevel = Math.Max(0.0, Math.Min(1.0, value));
+            RequestRender();
+        }
+
+        public void SetMovementEnabled(bool enabled)
+        {
+            movementEnabled = enabled;
+            if (!enabled)
+            {
+                mouseDownForDrag = false;
+                draggingWindow = false;
+                dragMoved = false;
+                snappingToDock = false;
+                dockSnapBlend = 1.0;
+                dockSnapVelocity = 0.0;
+                Capture = false;
+                dockPreview.HidePreview();
+            }
+            Cursor = enabled ? Cursors.SizeAll : Cursors.Hand;
+            RequestRender();
+        }
+
+        public void SetClickThrough(bool enabled)
+        {
+            clickThroughEnabled = enabled;
+            if (enabled)
+            {
+                movementEnabled = false;
+                mouseDownForDrag = false;
+                draggingWindow = false;
+                dragMoved = false;
+                snappingToDock = false;
+                dockSnapBlend = 1.0;
+                dockSnapVelocity = 0.0;
+                Capture = false;
+                dockPreview.HidePreview();
+            }
+            ApplyClickThroughStyle();
+            Cursor = clickThroughEnabled
+                ? Cursors.Default
+                : (movementEnabled ? Cursors.SizeAll : Cursors.Hand);
+            RequestRender();
+        }
+
+        public void SetDockEdge(string edge)
+        {
+            DockEdge parsed;
+            if (!TryParseDockEdge(edge, out parsed))
+            {
+                parsed = DockEdge.Top;
+            }
+            dockEdge = parsed;
+            if (!draggingWindow)
+            {
+                snappingToDock = false;
+                dockSnapBlend = 1.0;
+                dockSnapVelocity = 0.0;
+                ApplyGeometry();
+            }
+            RequestRender();
+        }
+
+        public void SetDockPosition(int position)
+        {
+            dockPosition = Math.Max(0, Math.Min(2, position));
+            if (!draggingWindow)
+            {
+                snappingToDock = false;
+                dockSnapBlend = 1.0;
+                dockSnapVelocity = 0.0;
+                ApplyGeometry();
+            }
+            RequestRender();
+        }
+
+        public void SetDockScreen(string deviceName)
+        {
+            dockScreenDevice = deviceName ?? "";
+            ApplyGeometry();
+            RequestRender();
+        }
+
+        public void ReapplyGeometry()
+        {
+            ApplyGeometry();
+            RequestRender();
+        }
+
+        public void EnsureAnimationClock()
+        {
+            if (current != null &&
+                phase != VisualPhase.Hidden &&
+                !IsDisposed)
+            {
+                StartFrameClock();
+                RequestRender();
+            }
+        }
+
+        public bool MovementEnabled
+        {
+            get { return movementEnabled; }
+        }
+
+        public bool ClickThroughEnabled
+        {
+            get { return clickThroughEnabled; }
+        }
+
+        public string DockEdgeName
+        {
+            get
+            {
+                if (dockEdge == DockEdge.Bottom)
+                {
+                    return "bottom";
+                }
+                if (dockEdge == DockEdge.Left)
+                {
+                    return "left";
+                }
+                if (dockEdge == DockEdge.Right)
+                {
+                    return "right";
+                }
+                return "top";
+            }
+        }
+
+        public int DockPosition
+        {
+            get { return dockPosition; }
+        }
+
+        private bool SideDocked
+        {
+            get
+            {
+                return dockEdge == DockEdge.Left ||
+                    dockEdge == DockEdge.Right;
+            }
+        }
+
+        public string DockScreenName
+        {
+            get { return dockScreenDevice ?? ""; }
+        }
+
+        private int MusicTargetWidth
+        {
+            get
+            {
+                return Scale(SideDocked ? SideMusicWidth : MusicWidth);
+            }
+        }
+
+        private int NotificationTargetWidth(bool compact)
+        {
+            if (SideDocked)
+            {
+                return Scale(
+                    compact ? SideCompactWidth : SideDetailWidth);
+            }
+            return Scale(compact ? CompactWidth : DetailWidth);
+        }
+
+        private int NotificationTargetHeight(bool compact)
+        {
+            if (SideDocked)
+            {
+                return Scale(
+                    compact ? SideCompactHeight : SideDetailHeight);
+            }
+            return Scale(compact ? CompactHeight : DetailHeight);
         }
 
         public void ShowScalePreview(double scale)
@@ -462,19 +709,27 @@ namespace SmartWindow
 
             if (currentIsMedia && current != null)
             {
+                bool wasPaused = musicPaused;
                 musicPaused = false;
                 musicPauseEndPending = false;
                 waveformMotionTarget = 1.0;
-                CancelQueuedAction();
+                if (wasPaused || phase == VisualPhase.Collapsing)
+                {
+                    CancelQueuedAction();
+                }
                 if (phase == VisualPhase.Collapsing)
                 {
                     musicEnding = false;
                     phase = VisualPhase.Music;
                     SetSpringTarget(
-                        Scale(MusicWidth),
+                        MusicTargetWidth,
                         Scale(musicControlsVisible
-                            ? MusicExpandedHeight
-                            : MusicHeight),
+                            ? (SideDocked
+                                ? SideMusicExpandedHeight
+                                : MusicExpandedHeight)
+                            : (SideDocked
+                                ? SideMusicHeight
+                                : MusicHeight)),
                         0.0);
                 }
                 current.Title = string.IsNullOrWhiteSpace(state.Title)
@@ -487,6 +742,7 @@ namespace SmartWindow
                     ? Localization.Get("media")
                     : state.AppName;
                 current.ArtworkPath = state.ArtworkPath;
+                current.MediaSignature = state.Signature;
                 RequestRender();
                 return;
             }
@@ -562,10 +818,14 @@ namespace SmartWindow
             phase = VisualPhase.Music;
             waveformMotionTarget = musicPaused ? 0.0 : 1.0;
             SetSpringTarget(
-                Scale(MusicWidth),
+                MusicTargetWidth,
                 Scale(musicControlsVisible
-                    ? MusicExpandedHeight
-                    : MusicHeight),
+                    ? (SideDocked
+                        ? SideMusicExpandedHeight
+                        : MusicExpandedHeight)
+                    : (SideDocked
+                        ? SideMusicHeight
+                        : MusicHeight)),
                 0.0);
         }
 
@@ -584,6 +844,7 @@ namespace SmartWindow
                 ? state.Album
                 : state.Artist;
             item.ArtworkPath = state.ArtworkPath;
+            item.MediaSignature = state.Signature;
             item.ArrivedAt = DateTime.Now;
             return item;
         }
@@ -602,6 +863,7 @@ namespace SmartWindow
 
             current = queue.Dequeue();
             currentIsMedia = false;
+            CancelNotificationCollapse();
             phase = VisualPhase.Seed;
             Opacity = 1.0;
             animatedWidth = Scale(SeedSize);
@@ -633,8 +895,8 @@ namespace SmartWindow
 
             phase = VisualPhase.Compact;
             SetSpringTarget(
-                Scale(CompactWidth),
-                Scale(CompactHeight),
+                NotificationTargetWidth(true),
+                NotificationTargetHeight(true),
                 0.0);
             QueueAction(StartDetail, 520);
         }
@@ -648,10 +910,10 @@ namespace SmartWindow
 
             phase = VisualPhase.Detail;
             SetSpringTarget(
-                Scale(DetailWidth),
-                Scale(DetailHeight),
+                NotificationTargetWidth(false),
+                NotificationTargetHeight(false),
                 1.0);
-            QueueAction(BeginCollapse, 5200);
+            ScheduleNotificationCollapse(5200);
         }
 
         private void BeginCollapse()
@@ -660,13 +922,37 @@ namespace SmartWindow
             {
                 return;
             }
-            if (hovering)
+            if (IsPointerOverIsland())
             {
-                QueueAction(BeginCollapse, 1200);
+                ScheduleNotificationCollapse(1200);
                 return;
             }
 
             CollapseNow();
+        }
+
+        private void ScheduleNotificationCollapse(int delayMilliseconds)
+        {
+            notificationCollapseAt = DateTime.UtcNow.AddMilliseconds(
+                Math.Max(1, delayMilliseconds));
+        }
+
+        private void CancelNotificationCollapse()
+        {
+            notificationCollapseAt = DateTime.MaxValue;
+        }
+
+        private bool IsPointerOverIsland()
+        {
+            if (!Visible ||
+                clickThroughEnabled ||
+                Bounds.Width <= 0 ||
+                Bounds.Height <= 0)
+            {
+                return false;
+            }
+            Point clientPoint = PointToClient(Control.MousePosition);
+            return ClientRectangle.Contains(clientPoint);
         }
 
         private void BeginMusicEnd()
@@ -682,6 +968,7 @@ namespace SmartWindow
         private void CollapseNow()
         {
             CancelQueuedAction();
+            CancelNotificationCollapse();
             StopControlsTimeout();
             collapseDissolveProgress = 0.0;
             phase = VisualPhase.Collapsing;
@@ -738,6 +1025,7 @@ namespace SmartWindow
         {
             current = null;
             currentIsMedia = false;
+            CancelNotificationCollapse();
             musicEnding = false;
             musicPaused = false;
             musicPauseEndPending = false;
@@ -856,18 +1144,22 @@ namespace SmartWindow
         private void StartFrameClock()
         {
             frameWindowHandle = Handle;
-            if (frameClockRunning)
+            if (frameClockRunning &&
+                frameThread != null &&
+                frameThread.IsAlive)
             {
                 return;
             }
 
+            frameClockRunning = false;
             frameStopEvent.Reset();
             lastFrameTimestamp = Stopwatch.GetTimestamp();
             Interlocked.Exchange(ref frameMessagePending, 0);
+            Volatile.Write(ref requestedFrameRate, ActiveFrameRate);
             frameClockRunning = true;
             frameThread = new Thread(FrameLoop);
             frameThread.IsBackground = true;
-            frameThread.Priority = ThreadPriority.AboveNormal;
+            frameThread.Priority = ThreadPriority.Normal;
             frameThread.Name = "SmartWindow.165Hz";
             frameThread.Start();
         }
@@ -875,7 +1167,16 @@ namespace SmartWindow
         private void StopFrameClock()
         {
             frameClockRunning = false;
-            frameStopEvent.Set();
+            try
+            {
+                if (!frameStopEvent.SafeWaitHandle.IsClosed)
+                {
+                    frameStopEvent.Set();
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+            }
             Thread thread = frameThread;
             frameThread = null;
             if (thread != null && thread != Thread.CurrentThread)
@@ -889,13 +1190,17 @@ namespace SmartWindow
             timeBeginPeriod(1);
             try
             {
-                long frameTicks = Math.Max(
-                    1L,
-                    (long)(Stopwatch.Frequency / TargetFrameRate));
                 long nextFrame = Stopwatch.GetTimestamp();
                 while (frameClockRunning)
                 {
                     DwmFlush();
+                    int frameRate = Math.Max(
+                        1,
+                        Volatile.Read(ref requestedFrameRate));
+                    long frameTicks = Math.Max(
+                        1L,
+                        (long)(Stopwatch.Frequency /
+                            (double)frameRate));
                     long now = Stopwatch.GetTimestamp();
                     if (now < nextFrame)
                     {
@@ -1048,11 +1353,25 @@ namespace SmartWindow
                     step,
                     240.0,
                     27.0);
+                StepSpring(
+                    ref dockSnapBlend,
+                    ref dockSnapVelocity,
+                    1.0,
+                    step,
+                    330.0,
+                    32.0);
             }
             detailBlend = Clamp01(detailBlend);
             waveformMotion = Clamp01(waveformMotion);
             glassBlend = Clamp01(glassBlend);
             qualityBlend = Clamp01(qualityBlend);
+            dockSnapBlend = Clamp01(dockSnapBlend);
+            if (snappingToDock && dockSnapBlend >= 0.999)
+            {
+                dockSnapBlend = 1.0;
+                dockSnapVelocity = 0.0;
+                snappingToDock = false;
+            }
             if (qualityBlend > 0.01 && glassBlend > 0.01)
             {
                 qualityParticleSeconds += elapsed;
@@ -1066,11 +1385,20 @@ namespace SmartWindow
                     elapsed / 0.78);
             }
             if (currentIsMedia &&
+                current != null &&
                 !musicPaused &&
-                !musicEnding &&
-                phase == VisualPhase.Music)
+                !musicEnding)
             {
                 waveformSeconds += elapsed;
+            }
+            if (current != null &&
+                !currentIsMedia &&
+                phase == VisualPhase.Detail &&
+                !draggingWindow &&
+                notificationCollapseAt != DateTime.MaxValue &&
+                DateTime.UtcNow >= notificationCollapseAt)
+            {
+                BeginCollapse();
             }
 
             int nextWidth = Math.Max(1, (int)Math.Round(animatedWidth));
@@ -1080,7 +1408,7 @@ namespace SmartWindow
                 nextHeight != currentHeight;
             currentWidth = nextWidth;
             currentHeight = nextHeight;
-            if (geometryChanged)
+            if (geometryChanged || draggingWindow || snappingToDock)
             {
                 ApplyGeometry();
             }
@@ -1088,6 +1416,33 @@ namespace SmartWindow
             {
                 RequestRender();
             }
+            UpdateRequestedFrameRate();
+        }
+
+        private void UpdateRequestedFrameRate()
+        {
+            bool active =
+                draggingWindow ||
+                snappingToDock ||
+                phase == VisualPhase.Collapsing ||
+                Math.Abs(widthVelocity) > 0.05 ||
+                Math.Abs(heightVelocity) > 0.05 ||
+                Math.Abs(detailBlendVelocity) > 0.01 ||
+                Math.Abs(waveformMotionVelocity) > 0.01 ||
+                Math.Abs(glassBlendVelocity) > 0.01 ||
+                Math.Abs(qualityBlendVelocity) > 0.01 ||
+                Math.Abs(animatedWidth - springTargetWidth) > 0.35 ||
+                Math.Abs(animatedHeight - springTargetHeight) > 0.35 ||
+                (currentIsMedia &&
+                 current != null &&
+                 phase == VisualPhase.Music &&
+                 !musicPaused &&
+                 !musicEnding) ||
+                Math.Abs(qualityBlend - qualityBlendTarget) > 0.01 ||
+                Math.Abs(glassBlend - glassBlendTarget) > 0.01;
+            Volatile.Write(
+                ref requestedFrameRate,
+                active ? ActiveFrameRate : IdleFrameRate);
         }
 
         private void OnGlobalMouseDown(int screenX, int screenY)
@@ -1140,10 +1495,86 @@ namespace SmartWindow
 
         private void ApplyGeometry()
         {
-            Screen screen = Screen.PrimaryScreen;
-            Rectangle bounds = screen.Bounds;
-            int left = bounds.Left + (bounds.Width - currentWidth) / 2;
-            int top = bounds.Top + Scale(7);
+            Point anchorPoint = draggingWindow || snappingToDock
+                ? dragLastScreen
+                : new Point(
+                    Bounds.Left + currentWidth / 2,
+                    Bounds.Top + currentHeight / 2);
+            Screen screen = draggingWindow || snappingToDock
+                ? Screen.FromPoint(anchorPoint)
+                : ResolveDockScreen(anchorPoint);
+            Rectangle bounds = screen.WorkingArea;
+            int margin = Scale(7);
+            int targetLeft;
+            int targetTop;
+            if (dockEdge == DockEdge.Bottom)
+            {
+                targetLeft = PositionedHorizontal(
+                    bounds,
+                    currentWidth,
+                    margin,
+                    dockPosition);
+                targetTop = bounds.Bottom - currentHeight - margin;
+            }
+            else if (dockEdge == DockEdge.Left)
+            {
+                targetLeft = bounds.Left + margin;
+                targetTop = PositionedVertical(
+                    bounds,
+                    currentHeight,
+                    margin,
+                    dockPosition);
+            }
+            else if (dockEdge == DockEdge.Right)
+            {
+                targetLeft = bounds.Right - currentWidth - margin;
+                targetTop = PositionedVertical(
+                    bounds,
+                    currentHeight,
+                    margin,
+                    dockPosition);
+            }
+            else
+            {
+                targetLeft = PositionedHorizontal(
+                    bounds,
+                    currentWidth,
+                    margin,
+                    dockPosition);
+                targetTop = bounds.Top + margin;
+            }
+
+            int left = targetLeft;
+            int top = targetTop;
+            if (draggingWindow)
+            {
+                left = dragLastScreen.X -
+                    dragGrabOffset.X -
+                    currentWidth / 2;
+                top = dragLastScreen.Y -
+                    dragGrabOffset.Y -
+                    currentHeight / 2;
+            }
+            else if (snappingToDock)
+            {
+                double blend = SmoothStep(dockSnapBlend);
+                double targetCenterX = targetLeft + currentWidth / 2.0;
+                double targetCenterY = targetTop + currentHeight / 2.0;
+                double startCenterX =
+                    dragLastScreen.X -
+                    dragGrabOffset.X;
+                double startCenterY =
+                    dragLastScreen.Y -
+                    dragGrabOffset.Y;
+                double centerX =
+                    startCenterX +
+                    (targetCenterX - startCenterX) * blend;
+                double centerY =
+                    startCenterY +
+                    (targetCenterY - startCenterY) * blend;
+                left = (int)Math.Round(centerX - currentWidth / 2.0);
+                top = (int)Math.Round(centerY - currentHeight / 2.0);
+            }
             if (Bounds.Left != left ||
                 Bounds.Top != top ||
                 Bounds.Width != currentWidth ||
@@ -1154,16 +1585,83 @@ namespace SmartWindow
             RequestRender();
         }
 
+        private Screen ResolveDockScreen(Point fallbackPoint)
+        {
+            if (!string.IsNullOrWhiteSpace(dockScreenDevice))
+            {
+                Screen[] screens = Screen.AllScreens;
+                for (int index = 0; index < screens.Length; index++)
+                {
+                    if (string.Equals(
+                        screens[index].DeviceName,
+                        dockScreenDevice,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        return screens[index];
+                    }
+                }
+            }
+            return Screen.FromPoint(fallbackPoint);
+        }
+
+        private int PositionedHorizontal(
+            Rectangle bounds,
+            int width,
+            int margin,
+            int position)
+        {
+            int available = Math.Max(0, bounds.Width - width);
+            if (position <= 0)
+            {
+                return bounds.Left + margin;
+            }
+            if (position >= 2)
+            {
+                return bounds.Right - width - margin;
+            }
+            return bounds.Left + available / 2;
+        }
+
+        private int PositionedVertical(
+            Rectangle bounds,
+            int height,
+            int margin,
+            int position)
+        {
+            int available = Math.Max(0, bounds.Height - height);
+            if (position <= 0)
+            {
+                return bounds.Top + margin;
+            }
+            if (position >= 2)
+            {
+                return bounds.Bottom - height - margin;
+            }
+            return bounds.Top + available / 2;
+        }
+
         private int CalculateCornerRadius()
         {
+            if (SideDocked && phase != VisualPhase.Seed)
+            {
+                return Math.Max(1, Scale(24));
+            }
             int radius = Math.Max(1, currentHeight / 2);
             if (currentIsMedia && phase == VisualPhase.Music)
             {
                 double expansion = Clamp01(
-                    (currentHeight - Scale(MusicHeight)) /
+                    (currentHeight -
+                        Scale(SideDocked
+                            ? SideMusicHeight
+                            : MusicHeight)) /
                     (double)Math.Max(
                         1,
-                        Scale(MusicExpandedHeight) - Scale(MusicHeight)));
+                        Scale(SideDocked
+                            ? SideMusicExpandedHeight
+                            : MusicExpandedHeight) -
+                        Scale(SideDocked
+                            ? SideMusicHeight
+                            : MusicHeight)));
                 radius = (int)Math.Round(
                     Scale(26) -
                     Scale(12) * SmoothStep(expansion));
@@ -1192,43 +1690,23 @@ namespace SmartWindow
 
             int width = Math.Max(1, currentWidth);
             int height = Math.Max(1, currentHeight);
-            IntPtr screenDc = IntPtr.Zero;
-            IntPtr memoryDc = IntPtr.Zero;
-            IntPtr bitmapHandle = IntPtr.Zero;
-            IntPtr previousBitmap = IntPtr.Zero;
             renderingLayered = true;
             try
             {
-                if (layeredBitmap == null ||
-                    layeredBitmap.Width != width ||
-                    layeredBitmap.Height != height)
+                if (layeredMemoryDc == IntPtr.Zero ||
+                    layeredSurfaceWidth != width ||
+                    layeredSurfaceHeight != height)
                 {
-                    if (layeredGraphics != null)
-                    {
-                        layeredGraphics.Dispose();
-                        layeredGraphics = null;
-                    }
-                    if (layeredBitmap != null)
-                    {
-                        layeredBitmap.Dispose();
-                    }
-                    layeredBitmap = new Bitmap(
-                        width,
-                        height,
-                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                    int dpi = Math.Max(96, DeviceDpi);
-                    layeredBitmap.SetResolution(dpi, dpi);
-                    layeredGraphics = Graphics.FromImage(layeredBitmap);
+                    ReleaseLayeredSurface();
+                    CreateLayeredSurface(width, height);
+                }
+                if (layeredGraphics == null)
+                {
+                    return;
                 }
 
                 layeredGraphics.Clear(Color.Transparent);
                 PaintSurface(layeredGraphics);
-
-                screenDc = GetDC(IntPtr.Zero);
-                memoryDc = CreateCompatibleDC(screenDc);
-                bitmapHandle = layeredBitmap.GetHbitmap(
-                    Color.FromArgb(0, 0, 0, 0));
-                previousBitmap = SelectObject(memoryDc, bitmapHandle);
 
                 NativePoint destination = new NativePoint();
                 destination.X = Bounds.Left;
@@ -1244,10 +1722,10 @@ namespace SmartWindow
                 blend.AlphaFormat = 1;
                 UpdateLayeredWindow(
                     Handle,
-                    screenDc,
+                    IntPtr.Zero,
                     ref destination,
                     ref size,
-                    memoryDc,
+                    layeredMemoryDc,
                     ref source,
                     0,
                     ref blend,
@@ -1259,36 +1737,113 @@ namespace SmartWindow
             }
             finally
             {
-                if (memoryDc != IntPtr.Zero && previousBitmap != IntPtr.Zero)
-                {
-                    SelectObject(memoryDc, previousBitmap);
-                }
-                if (bitmapHandle != IntPtr.Zero)
-                {
-                    DeleteObject(bitmapHandle);
-                }
-                if (memoryDc != IntPtr.Zero)
-                {
-                    DeleteDC(memoryDc);
-                }
-                if (screenDc != IntPtr.Zero)
-                {
-                    ReleaseDC(IntPtr.Zero, screenDc);
-                }
                 renderingLayered = false;
             }
         }
 
+        private void CreateLayeredSurface(int width, int height)
+        {
+            IntPtr screenDc = GetDC(IntPtr.Zero);
+            if (screenDc == IntPtr.Zero)
+            {
+                return;
+            }
+            try
+            {
+                layeredMemoryDc = CreateCompatibleDC(screenDc);
+                if (layeredMemoryDc == IntPtr.Zero)
+                {
+                    return;
+                }
+
+                BitmapInfo info = new BitmapInfo();
+                info.Header.Size = (uint)Marshal.SizeOf(
+                    typeof(BitmapInfoHeader));
+                info.Header.Width = width;
+                info.Header.Height = -height;
+                info.Header.Planes = 1;
+                info.Header.BitCount = 32;
+                info.Header.Compression = 0;
+                IntPtr pixels;
+                layeredDib = CreateDIBSection(
+                    screenDc,
+                    ref info,
+                    0,
+                    out pixels,
+                    IntPtr.Zero,
+                    0);
+                if (layeredDib == IntPtr.Zero)
+                {
+                    DeleteDC(layeredMemoryDc);
+                    layeredMemoryDc = IntPtr.Zero;
+                    return;
+                }
+
+                layeredOriginalBitmap = SelectObject(
+                    layeredMemoryDc,
+                    layeredDib);
+                layeredGraphics = Graphics.FromHdc(
+                    layeredMemoryDc);
+                layeredGraphics.SmoothingMode =
+                    SmoothingMode.AntiAlias;
+                layeredGraphics.InterpolationMode =
+                    InterpolationMode.HighQualityBicubic;
+                layeredGraphics.PixelOffsetMode =
+                    PixelOffsetMode.HighQuality;
+                layeredGraphics.CompositingQuality =
+                    CompositingQuality.HighQuality;
+                layeredGraphics.TextRenderingHint =
+                    System.Drawing.Text.TextRenderingHint
+                        .AntiAliasGridFit;
+                layeredSurfaceWidth = width;
+                layeredSurfaceHeight = height;
+            }
+            finally
+            {
+                ReleaseDC(IntPtr.Zero, screenDc);
+            }
+        }
+
+        private void ReleaseLayeredSurface()
+        {
+            if (layeredGraphics != null)
+            {
+                layeredGraphics.Dispose();
+                layeredGraphics = null;
+            }
+            if (layeredMemoryDc != IntPtr.Zero)
+            {
+                if (layeredOriginalBitmap != IntPtr.Zero)
+                {
+                    SelectObject(
+                        layeredMemoryDc,
+                        layeredOriginalBitmap);
+                    layeredOriginalBitmap = IntPtr.Zero;
+                }
+                if (layeredDib != IntPtr.Zero)
+                {
+                    DeleteObject(layeredDib);
+                    layeredDib = IntPtr.Zero;
+                }
+                DeleteDC(layeredMemoryDc);
+                layeredMemoryDc = IntPtr.Zero;
+            }
+            else if (layeredDib != IntPtr.Zero)
+            {
+                DeleteObject(layeredDib);
+                layeredDib = IntPtr.Zero;
+            }
+            layeredSurfaceWidth = 0;
+            layeredSurfaceHeight = 0;
+        }
+
         private int Scale(int logicalPixels)
         {
-            using (Graphics graphics = CreateGraphics())
-            {
-                return (int)Math.Round(
-                    logicalPixels *
-                    graphics.DpiX /
-                    96f *
-                    userScale);
-            }
+            return (int)Math.Round(
+                logicalPixels *
+                baseFontDpi /
+                96f *
+                userScale);
         }
 
         protected override void OnShown(EventArgs e)
@@ -1302,6 +1857,21 @@ namespace SmartWindow
                 currentHeight = (int)Math.Round(animatedHeight);
             }
             ApplyGeometry();
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+            baseFontDpi = e.DeviceDpiNew;
+            CreateFonts(baseFontDpi * (float)userScale);
+            BeginInvoke(new Action(delegate
+            {
+                if (current != null && phase != VisualPhase.Hidden)
+                {
+                    SetUiScale(userScale);
+                }
+                ApplyGeometry();
+            }));
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -1377,7 +1947,14 @@ namespace SmartWindow
             }
             else if (phase == VisualPhase.Music)
             {
-                DrawMusic(graphics);
+                if (SideDocked)
+                {
+                    DrawSideMusic(graphics);
+                }
+                else
+                {
+                    DrawMusic(graphics);
+                }
             }
             else if (phase == VisualPhase.Collapsing)
             {
@@ -1385,7 +1962,14 @@ namespace SmartWindow
             }
             else
             {
-                DrawExpanded(graphics);
+                if (SideDocked)
+                {
+                    DrawSideExpanded(graphics);
+                }
+                else
+                {
+                    DrawExpanded(graphics);
+                }
             }
         }
 
@@ -1910,6 +2494,86 @@ namespace SmartWindow
             DrawQueueBadge(graphics, blend);
         }
 
+        private void DrawSideExpanded(Graphics graphics)
+        {
+            double blend = phase == VisualPhase.Detail
+                ? Clamp01(detailBlend)
+                : 0.35;
+            int padding = Scale(16);
+            int iconSize = Scale((int)Math.Round(38 + 4 * blend));
+            RectangleF circle = new RectangleF(
+                padding,
+                Scale(17),
+                iconSize,
+                iconSize);
+            using (SolidBrush white = new SolidBrush(
+                Color.FromArgb(244, 243, 238)))
+            {
+                graphics.FillEllipse(white, circle);
+            }
+            DrawNotificationGlyph(graphics, circle);
+
+            int textLeft = padding + iconSize + Scale(12);
+            int textRight = ClientSize.Width - padding;
+            DrawFadingText(
+                graphics,
+                Localization.Get("messageMode"),
+                microFont,
+                new RectangleF(
+                    textLeft,
+                    Scale(14),
+                    Math.Max(1, textRight - textLeft),
+                    Scale(15)),
+                Color.FromArgb(150, 219, 215, 202),
+                1.0);
+
+            DrawFadingText(
+                graphics,
+                current.Title,
+                titleFont,
+                new RectangleF(
+                    textLeft,
+                    Scale(31),
+                    Math.Max(1, textRight - textLeft),
+                    Scale(31)),
+                Color.FromArgb(246, 245, 240),
+                1.0,
+                false,
+                StringAlignment.Near,
+                StringAlignment.Center);
+
+            if (blend > 0.02 && !string.IsNullOrWhiteSpace(current.Body))
+            {
+                DrawScrollingText(
+                    graphics,
+                    current.Body,
+                    bodyFont,
+                    new RectangleF(
+                        padding,
+                        Scale(70),
+                        ClientSize.Width - padding * 2,
+                        Math.Max(1, ClientSize.Height - Scale(102))),
+                    Color.FromArgb(215, 222, 220, 213),
+                    blend,
+                    waveformSeconds);
+            }
+
+            DrawFadingText(
+                graphics,
+                string.IsNullOrWhiteSpace(current.AppName)
+                    ? Localization.Get("appNotification")
+                    : current.AppName,
+                microFont,
+                new RectangleF(
+                    padding,
+                    ClientSize.Height - Scale(27),
+                    Math.Max(1, ClientSize.Width - padding * 2 - Scale(38)),
+                    Scale(15)),
+                Color.FromArgb(160, 219, 215, 202),
+                blend);
+            DrawQueueBadge(graphics, blend);
+        }
+
         private void DrawQueueBadge(Graphics graphics, double opacity)
         {
             double visibleOpacity = Clamp01(opacity);
@@ -2116,6 +2780,166 @@ namespace SmartWindow
             }
         }
 
+        private void DrawSideMusic(Graphics graphics)
+        {
+            if (current == null)
+            {
+                return;
+            }
+
+            double reveal = Clamp01(
+                (ClientSize.Width - Scale(SeedSize)) /
+                (double)Math.Max(
+                    1,
+                    Scale(SideMusicWidth) - Scale(SeedSize)));
+            double easedReveal = SmoothStep(reveal);
+            int artSize = (int)Math.Round(
+                Scale(38) + (Scale(58) - Scale(38)) * easedReveal);
+            int targetLeft = Scale(18);
+            int centeredLeft = (ClientSize.Width - artSize) / 2;
+            int artLeft = (int)Math.Round(
+                centeredLeft +
+                (targetLeft - centeredLeft) * easedReveal);
+            Rectangle albumBounds = new Rectangle(
+                artLeft,
+                Scale(20),
+                artSize,
+                artSize);
+            DrawAlbumArtwork(graphics, albumBounds);
+
+            double textOpacity = Clamp01(
+                (ClientSize.Width - Scale(142)) /
+                (double)Math.Max(
+                    1,
+                    Scale(SideMusicWidth) - Scale(142)));
+            if (textOpacity > 0.025)
+            {
+                int textLeft = Scale(92);
+                int textRight = ClientSize.Width - Scale(18);
+                DrawFadingText(
+                    graphics,
+                    string.IsNullOrWhiteSpace(current.AppName)
+                        ? Localization.Get("media")
+                        : current.AppName.ToUpperInvariant(),
+                    microFont,
+                    new RectangleF(
+                        textLeft,
+                        Scale(18),
+                        Math.Max(1, textRight - textLeft),
+                        Scale(13)),
+                    Color.FromArgb(160, 219, 215, 202),
+                    textOpacity);
+                DrawScrollingText(
+                    graphics,
+                    string.IsNullOrWhiteSpace(current.Title)
+                        ? Localization.Get("nowPlaying")
+                        : current.Title,
+                    titleFont,
+                    new RectangleF(
+                        textLeft,
+                        Scale(36),
+                        Math.Max(1, textRight - textLeft),
+                        Scale(26)),
+                    Color.FromArgb(247, 246, 242),
+                    textOpacity,
+                    waveformSeconds);
+                if (!string.IsNullOrWhiteSpace(current.Body))
+                {
+                    DrawScrollingText(
+                        graphics,
+                        current.Body,
+                        bodyFont,
+                        new RectangleF(
+                            textLeft,
+                            Scale(65),
+                            Math.Max(1, textRight - textLeft),
+                            Scale(20)),
+                        Color.FromArgb(205, 219, 215, 205),
+                        textOpacity * 0.9,
+                        waveformSeconds);
+                }
+            }
+
+            double waveformOpacity = Clamp01(
+                (ClientSize.Width - Scale(178)) /
+                (double)Math.Max(
+                    1,
+                    Scale(SideMusicWidth) - Scale(178)));
+            if (waveformOpacity > 0.02)
+            {
+                DrawSideWaveform(
+                    graphics,
+                    new Rectangle(
+                        Scale(20),
+                        Scale(112),
+                        ClientSize.Width - Scale(40),
+                        Scale(34)),
+                    waveformOpacity);
+            }
+
+            double controlsProgress = Clamp01(
+                (ClientSize.Height - Scale(SideMusicHeight)) /
+                (double)Math.Max(
+                    1,
+                    Scale(SideMusicExpandedHeight) -
+                    Scale(SideMusicHeight)));
+            if (musicControlsVisible && controlsProgress > 0.02)
+            {
+                DrawMusicControls(graphics, controlsProgress);
+            }
+        }
+
+        private void DrawSideWaveform(
+            Graphics graphics,
+            Rectangle bounds,
+            double opacity)
+        {
+            const int barCount = 17;
+            double motionLevel =
+                0.12 + 0.88 * Clamp01(waveformMotion);
+            double gap = bounds.Width / (double)barCount;
+            float barWidth = Math.Max(1f, Scale(2));
+            float centerY = bounds.Top + bounds.Height / 2f;
+            for (int index = 0; index < barCount; index++)
+            {
+                double phase =
+                    waveformSeconds * 7.5 + index * 0.62;
+                double envelope =
+                    Math.Sin(waveformSeconds * 2.1 + index * 0.25) *
+                    0.24 + 0.76;
+                double amplitude =
+                    Math.Abs(
+                        Math.Sin(phase) * 0.64 +
+                        Math.Sin(phase * 1.67 + 0.8) * 0.36) *
+                    envelope *
+                    motionLevel;
+                float height = (float)Math.Max(
+                    Scale(3),
+                    Math.Round(Scale(4) + Scale(24) * amplitude));
+                float x = (float)(
+                    bounds.Left +
+                    gap * index +
+                    gap / 2.0);
+                using (Pen bar = new Pen(
+                    Color.FromArgb(
+                        (int)Math.Round(220 * opacity),
+                        musicAccent.R,
+                        musicAccent.G,
+                        musicAccent.B),
+                    barWidth))
+                {
+                    bar.StartCap = LineCap.Round;
+                    bar.EndCap = LineCap.Round;
+                    graphics.DrawLine(
+                        bar,
+                        x,
+                        centerY - height / 2f,
+                        x,
+                        centerY + height / 2f);
+                }
+            }
+        }
+
         private void DrawMusicControls(Graphics graphics, double opacity)
         {
             string[] labels = new string[]
@@ -2178,6 +3002,169 @@ namespace SmartWindow
                     StringAlignment.Center,
                     StringAlignment.Center);
             }
+            DrawPlaybackProgress(graphics, opacity);
+            DrawVolumeControl(graphics, opacity);
+        }
+
+        private void DrawPlaybackProgress(Graphics graphics, double opacity)
+        {
+            Rectangle track = PlaybackProgressBounds();
+            double duration = mediaState == null
+                ? 0.0
+                : mediaState.DurationSeconds;
+            double position = mediaState == null
+                ? 0.0
+                : mediaState.PositionSeconds;
+            double progress = duration <= 0.1
+                ? 0.0
+                : Clamp01(position / duration);
+            using (Pen background = new Pen(
+                Color.FromArgb(
+                    (int)Math.Round(42 * opacity),
+                    255,
+                    255,
+                    255),
+                Math.Max(2f, Scale(3))))
+            using (Pen foreground = new Pen(
+                Color.FromArgb(
+                    (int)Math.Round(205 * opacity),
+                    musicAccent.R,
+                    musicAccent.G,
+                    musicAccent.B),
+                Math.Max(2f, Scale(3))))
+            {
+                background.StartCap = LineCap.Round;
+                background.EndCap = LineCap.Round;
+                foreground.StartCap = LineCap.Round;
+                foreground.EndCap = LineCap.Round;
+                float y = track.Top + track.Height / 2f;
+                graphics.DrawLine(
+                    background,
+                    track.Left,
+                    y,
+                    track.Right,
+                    y);
+                graphics.DrawLine(
+                    foreground,
+                    track.Left,
+                    y,
+                    track.Left + (float)(track.Width * progress),
+                    y);
+            }
+            string currentText = FormatPlaybackTime(position);
+            string durationText = duration > 0.1
+                ? FormatPlaybackTime(duration)
+                : "--:--";
+            DrawFadingText(
+                graphics,
+                currentText,
+                microFont,
+                new Rectangle(
+                    track.Left,
+                    track.Bottom + Scale(2),
+                    Scale(58),
+                    Scale(14)),
+                Color.FromArgb(150, 220, 222, 216),
+                opacity);
+            DrawFadingText(
+                graphics,
+                durationText,
+                microFont,
+                new Rectangle(
+                    track.Right - Scale(58),
+                    track.Bottom + Scale(2),
+                    Scale(58),
+                    Scale(14)),
+                Color.FromArgb(150, 220, 222, 216),
+                opacity,
+                false,
+                StringAlignment.Far,
+                StringAlignment.Center);
+        }
+
+        private void DrawVolumeControl(Graphics graphics, double opacity)
+        {
+            Rectangle track = VolumeTrackBounds();
+            using (Pen background = new Pen(
+                Color.FromArgb(
+                    (int)Math.Round(38 * opacity),
+                    255,
+                    255,
+                    255),
+                Math.Max(2f, Scale(3))))
+            using (Pen foreground = new Pen(
+                Color.FromArgb(
+                    (int)Math.Round(180 * opacity),
+                    215,
+                    230,
+                    224),
+                Math.Max(2f, Scale(3))))
+            {
+                background.StartCap = LineCap.Round;
+                background.EndCap = LineCap.Round;
+                foreground.StartCap = LineCap.Round;
+                foreground.EndCap = LineCap.Round;
+                float y = track.Top + track.Height / 2f;
+                graphics.DrawLine(
+                    background,
+                    track.Left,
+                    y,
+                    track.Right,
+                    y);
+                graphics.DrawLine(
+                    foreground,
+                    track.Left,
+                    y,
+                    track.Left + (float)(track.Width * volumeLevel),
+                    y);
+            }
+            Rectangle soundButton = SoundSettingsBounds();
+            using (SolidBrush fill = new SolidBrush(
+                Color.FromArgb(
+                    (int)Math.Round(28 * opacity),
+                    255,
+                    255,
+                    255)))
+            using (SolidBrush ink = new SolidBrush(
+                Color.FromArgb(
+                    (int)Math.Round(205 * opacity),
+                    235,
+                    240,
+                    236)))
+            {
+                graphics.FillEllipse(fill, soundButton);
+                float left = soundButton.Left + Scale(9);
+                float centerY = soundButton.Top + soundButton.Height / 2f;
+                PointF[] speaker = new PointF[]
+                {
+                    new PointF(left, centerY - Scale(3)),
+                    new PointF(left + Scale(4), centerY - Scale(3)),
+                    new PointF(left + Scale(9), centerY - Scale(7)),
+                    new PointF(left + Scale(9), centerY + Scale(7)),
+                    new PointF(left + Scale(4), centerY + Scale(3)),
+                    new PointF(left, centerY + Scale(3))
+                };
+                graphics.FillPolygon(ink, speaker);
+                using (Pen wave = new Pen(ink.Color, 1f))
+                {
+                    graphics.DrawArc(
+                        wave,
+                        left + Scale(7),
+                        centerY - Scale(6),
+                        Scale(9),
+                        Scale(12),
+                        -55,
+                        110);
+                }
+            }
+        }
+
+        private string FormatPlaybackTime(double seconds)
+        {
+            int total = Math.Max(0, (int)Math.Floor(seconds));
+            return (total / 60).ToString("00") +
+                ":" +
+                (total % 60).ToString("00");
         }
 
         private void DrawMusicControlGlyph(
@@ -2317,64 +3304,176 @@ namespace SmartWindow
         private Image LoadAlbumArtwork()
         {
             string path = current == null ? "" : current.ArtworkPath;
-            if (string.IsNullOrWhiteSpace(path) ||
-                !System.IO.File.Exists(path))
+            string signature = current == null
+                ? ""
+                : (current.MediaSignature ?? "");
+            if (string.IsNullOrWhiteSpace(path))
             {
-                if (albumArtwork != null)
-                {
-                    albumArtwork.Dispose();
-                    albumArtwork = null;
-                }
-                musicAccent = Color.FromArgb(240, 218, 151);
-                albumArtworkPath = "";
-                albumArtworkStamp = DateTime.MinValue;
+                CancelAlbumArtworkRequest();
+                ClearAlbumArtwork();
                 return null;
             }
 
-            DateTime stamp;
-            try
-            {
-                stamp = System.IO.File.GetLastWriteTimeUtc(path);
-            }
-            catch
-            {
-                return albumArtwork;
-            }
             if (albumArtwork != null &&
                 string.Equals(
                     albumArtworkPath,
                     path,
                     StringComparison.OrdinalIgnoreCase) &&
-                stamp == albumArtworkStamp)
+                string.Equals(
+                    albumArtworkSignature,
+                    signature,
+                    StringComparison.Ordinal))
             {
                 return albumArtwork;
             }
 
-            try
+            ClearAlbumArtwork();
+            if (DateTime.UtcNow < artworkRetryAfter)
             {
-                using (System.IO.FileStream stream = new System.IO.FileStream(
+                return null;
+            }
+
+            if (artworkLoadInProgress &&
+                string.Equals(
+                    pendingArtworkPath,
                     path,
-                    System.IO.FileMode.Open,
-                    System.IO.FileAccess.Read,
-                    System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete))
-                using (Image source = Image.FromStream(stream))
-                {
-                    Bitmap copy = new Bitmap(source);
-                    if (albumArtwork != null)
-                    {
-                        albumArtwork.Dispose();
-                    }
-                    albumArtwork = copy;
-                    albumArtworkPath = path;
-                    albumArtworkStamp = stamp;
-                    musicAccent = ExtractMusicAccent(copy);
-                }
-            }
-            catch
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    pendingArtworkSignature,
+                    signature,
+                    StringComparison.Ordinal))
             {
-                return albumArtwork;
+                return null;
             }
-            return albumArtwork;
+
+            pendingArtworkPath = path;
+            pendingArtworkSignature = signature;
+            artworkLoadInProgress = true;
+            int generation = ++artworkRequestGeneration;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Bitmap loaded = null;
+                Color accent = Color.FromArgb(240, 218, 151);
+                try
+                {
+                    using (System.IO.FileStream stream =
+                        new System.IO.FileStream(
+                            path,
+                            System.IO.FileMode.Open,
+                            System.IO.FileAccess.Read,
+                            System.IO.FileShare.ReadWrite |
+                                System.IO.FileShare.Delete))
+                    using (Image source = Image.FromStream(stream))
+                    {
+                        loaded = new Bitmap(source);
+                        accent = ExtractMusicAccent(loaded);
+                    }
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    if (IsDisposed || Disposing)
+                    {
+                        if (loaded != null)
+                        {
+                            loaded.Dispose();
+                        }
+                        return;
+                    }
+                    BeginInvoke(new Action(delegate
+                    {
+                        ApplyLoadedAlbumArtwork(
+                            generation,
+                            path,
+                            signature,
+                            loaded,
+                            accent);
+                    }));
+                }
+                catch
+                {
+                    if (loaded != null)
+                    {
+                        loaded.Dispose();
+                    }
+                }
+            });
+            return null;
+        }
+
+        private void ApplyLoadedAlbumArtwork(
+            int generation,
+            string path,
+            string signature,
+            Bitmap loaded,
+            Color accent)
+        {
+            if (generation != artworkRequestGeneration ||
+                IsDisposed)
+            {
+                if (loaded != null)
+                {
+                    loaded.Dispose();
+                }
+                return;
+            }
+
+            artworkLoadInProgress = false;
+            pendingArtworkPath = null;
+            pendingArtworkSignature = null;
+            if (loaded == null ||
+                current == null ||
+                !string.Equals(
+                    current.ArtworkPath,
+                    path,
+                    StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(
+                    current.MediaSignature ?? "",
+                    signature,
+                    StringComparison.Ordinal))
+            {
+                if (loaded != null)
+                {
+                    loaded.Dispose();
+                }
+                artworkRetryAfter = DateTime.UtcNow.AddMilliseconds(220);
+                return;
+            }
+
+            if (albumArtwork != null)
+            {
+                albumArtwork.Dispose();
+            }
+            albumArtwork = loaded;
+            albumArtworkPath = path;
+            albumArtworkSignature = signature;
+            musicAccent = accent;
+            artworkRetryAfter = DateTime.MinValue;
+            RequestRender();
+        }
+
+        private void ClearAlbumArtwork()
+        {
+            if (albumArtwork != null)
+            {
+                albumArtwork.Dispose();
+                albumArtwork = null;
+            }
+            albumArtworkPath = "";
+            albumArtworkSignature = "";
+            musicAccent = Color.FromArgb(240, 218, 151);
+        }
+
+        private void CancelAlbumArtworkRequest()
+        {
+            artworkRequestGeneration++;
+            artworkLoadInProgress = false;
+            pendingArtworkPath = null;
+            pendingArtworkSignature = null;
+            artworkRetryAfter = DateTime.MinValue;
         }
 
         private static Color ExtractMusicAccent(Bitmap bitmap)
@@ -2386,19 +3485,52 @@ namespace SmartWindow
             double[] blue = new double[bucketCount];
             int stepX = Math.Max(1, bitmap.Width / 48);
             int stepY = Math.Max(1, bitmap.Height / 48);
+            Rectangle lockArea = new Rectangle(
+                0,
+                0,
+                bitmap.Width,
+                bitmap.Height);
+            System.Drawing.Imaging.BitmapData data =
+                bitmap.LockBits(
+                    lockArea,
+                    System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            byte[] pixels = new byte[
+                Math.Abs(data.Stride) * bitmap.Height];
+            try
+            {
+                Marshal.Copy(
+                    data.Scan0,
+                    pixels,
+                    0,
+                    pixels.Length);
+            }
+            finally
+            {
+                bitmap.UnlockBits(data);
+            }
 
             for (int y = 0; y < bitmap.Height; y += stepY)
             {
+                int row = y * data.Stride;
                 for (int x = 0; x < bitmap.Width; x += stepX)
                 {
-                    Color color = bitmap.GetPixel(x, y);
-                    if (color.A < 128)
+                    int offset = row + x * 4;
+                    int blueValue = pixels[offset];
+                    int greenValue = pixels[offset + 1];
+                    int redValue = pixels[offset + 2];
+                    int a = pixels[offset + 3];
+                    if (a < 128)
                     {
                         continue;
                     }
 
-                    int maximum = Math.Max(color.R, Math.Max(color.G, color.B));
-                    int minimum = Math.Min(color.R, Math.Min(color.G, color.B));
+                    int maximum = Math.Max(
+                        redValue,
+                        Math.Max(greenValue, blueValue));
+                    int minimum = Math.Min(
+                        redValue,
+                        Math.Min(greenValue, blueValue));
                     if (maximum < 45)
                     {
                         continue;
@@ -2412,14 +3544,20 @@ namespace SmartWindow
                     }
 
                     int bucket = (int)(
-                        color.GetHue() / 360.0 * bucketCount) % bucketCount;
+                        RgbHue(
+                            redValue,
+                            greenValue,
+                            blueValue,
+                            maximum,
+                            minimum) /
+                        360.0 * bucketCount) % bucketCount;
                     double weight =
                         value * 0.45 +
                         saturation * 1.25;
                     weights[bucket] += weight;
-                    red[bucket] += color.R * weight;
-                    green[bucket] += color.G * weight;
-                    blue[bucket] += color.B * weight;
+                    red[bucket] += redValue * weight;
+                    green[bucket] += greenValue * weight;
+                    blue[bucket] += blueValue * weight;
                 }
             }
 
@@ -2450,6 +3588,35 @@ namespace SmartWindow
                 b = Math.Min(255, (int)Math.Round(b * scale));
             }
             return Color.FromArgb(r, g, b);
+        }
+
+        private static double RgbHue(
+            int red,
+            int green,
+            int blue,
+            int maximum,
+            int minimum)
+        {
+            int delta = maximum - minimum;
+            if (delta <= 0)
+            {
+                return 0.0;
+            }
+            double hue;
+            if (maximum == red)
+            {
+                hue = (green - blue) / (double)delta;
+            }
+            else if (maximum == green)
+            {
+                hue = 2.0 + (blue - red) / (double)delta;
+            }
+            else
+            {
+                hue = 4.0 + (red - green) / (double)delta;
+            }
+            hue *= 60.0;
+            return hue < 0.0 ? hue + 360.0 : hue;
         }
 
         private void DrawWaveform(Graphics graphics, double opacity)
@@ -2812,12 +3979,58 @@ namespace SmartWindow
 
         private void OnIslandClick(object sender, MouseEventArgs e)
         {
+            if (DateTime.UtcNow < suppressClickUntil)
+            {
+                return;
+            }
             if (currentIsMedia && current != null &&
                 phase == VisualPhase.Music)
             {
                 if (!musicControlsVisible)
                 {
                     ExpandMusicControls();
+                    return;
+                }
+
+                if (SoundSettingsBounds().Contains(e.Location))
+                {
+                    EventHandler soundHandler = SoundSettingsRequested;
+                    if (soundHandler != null)
+                    {
+                        soundHandler(this, EventArgs.Empty);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+
+                if (PlaybackProgressBounds().Contains(e.Location) &&
+                    mediaState != null &&
+                    mediaState.DurationSeconds > 0.1)
+                {
+                    Rectangle track = PlaybackProgressBounds();
+                    double fraction = Clamp01(
+                        (e.X - track.Left) /
+                        (double)Math.Max(1, track.Width));
+                    EventHandler<double> seekHandler = SeekRequested;
+                    if (seekHandler != null)
+                    {
+                        seekHandler(
+                            this,
+                            mediaState.DurationSeconds * fraction);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+
+                if (e.Location.Y <= Scale(24))
+                {
+                    EventHandler sourceHandler =
+                        MediaSourceOpenRequested;
+                    if (sourceHandler != null)
+                    {
+                        sourceHandler(this, EventArgs.Empty);
+                    }
+                    ResetControlsTimeout();
                     return;
                 }
 
@@ -2853,6 +4066,10 @@ namespace SmartWindow
 
         private void OnIslandDoubleClick(object sender, MouseEventArgs e)
         {
+            if (DateTime.UtcNow < suppressClickUntil)
+            {
+                return;
+            }
             if (!currentIsMedia || current == null)
             {
                 return;
@@ -2871,8 +4088,75 @@ namespace SmartWindow
             }
         }
 
+        private void OnIslandMouseDown(object sender, MouseEventArgs e)
+        {
+            mouseDownForDrag = false;
+            dragMoved = false;
+            if (e.Button == MouseButtons.Left &&
+                currentIsMedia &&
+                musicControlsVisible &&
+                VolumeTrackBounds().Contains(e.Location))
+            {
+                draggingVolume = true;
+                Capture = true;
+                UpdateVolumeFromPoint(e.X);
+                return;
+            }
+            if (!movementEnabled ||
+                clickThroughEnabled ||
+                e.Button != MouseButtons.Left ||
+                current == null)
+            {
+                return;
+            }
+            if (currentIsMedia &&
+                musicControlsVisible &&
+                HitTestMusicButton(e.Location) >= 0)
+            {
+                return;
+            }
+
+            dragStartScreen = Control.MousePosition;
+            dragLastScreen = dragStartScreen;
+            dragGrabOffset = new Point(
+                dragStartScreen.X -
+                    Bounds.Left -
+                    currentWidth / 2,
+                dragStartScreen.Y -
+                    Bounds.Top -
+                    currentHeight / 2);
+            mouseDownForDrag = true;
+            Capture = true;
+        }
+
         private void OnIslandMouseMove(object sender, MouseEventArgs e)
         {
+            if (draggingVolume)
+            {
+                UpdateVolumeFromPoint(e.X);
+                return;
+            }
+            if (mouseDownForDrag &&
+                (e.Button & MouseButtons.Left) == MouseButtons.Left)
+            {
+                Point screenPoint = Control.MousePosition;
+                int threshold = Math.Max(7, Scale(7));
+                if (!dragMoved &&
+                    (Math.Abs(screenPoint.X - dragStartScreen.X) >= threshold ||
+                     Math.Abs(screenPoint.Y - dragStartScreen.Y) >= threshold))
+                {
+                    BeginWindowDrag(screenPoint);
+                }
+                if (dragMoved)
+                {
+                    dragLastScreen = screenPoint;
+                    UpdateDockPreview(screenPoint);
+                    ApplyGeometry();
+                    RequestRender();
+                    return;
+                }
+            }
+
             int nextHovered =
                 currentIsMedia &&
                 current != null &&
@@ -2885,8 +4169,304 @@ namespace SmartWindow
                 hoveredMusicButton = nextHovered;
                 Cursor = nextHovered >= 0
                     ? Cursors.Hand
-                    : Cursors.Default;
+                    : (movementEnabled
+                        ? Cursors.SizeAll
+                        : Cursors.Hand);
                 RequestRender();
+            }
+        }
+
+        private void OnIslandMouseUp(object sender, MouseEventArgs e)
+        {
+            if (draggingVolume && e.Button == MouseButtons.Left)
+            {
+                draggingVolume = false;
+                Capture = false;
+                ResetControlsTimeout();
+                return;
+            }
+            if (!mouseDownForDrag || e.Button != MouseButtons.Left)
+            {
+                return;
+            }
+            mouseDownForDrag = false;
+            Capture = false;
+            if (!dragMoved)
+            {
+                return;
+            }
+
+            dragLastScreen = Control.MousePosition;
+            FinishWindowDrag();
+        }
+
+        private void UpdateVolumeFromPoint(int x)
+        {
+            Rectangle track = VolumeTrackBounds();
+            double value = Math.Max(
+                0.0,
+                Math.Min(
+                    1.0,
+                    (x - track.Left) /
+                        (double)Math.Max(1, track.Width)));
+            volumeLevel = value;
+            EventHandler<double> handler = VolumeChangeRequested;
+            if (handler != null)
+            {
+                handler(this, value);
+            }
+            RequestRender();
+        }
+
+        private void BeginWindowDrag(Point screenPoint)
+        {
+            dragMoved = true;
+            draggingWindow = true;
+            snappingToDock = false;
+            dockSnapBlend = 0.0;
+            dockSnapVelocity = 0.0;
+            dragLastScreen = screenPoint;
+            CancelQueuedAction();
+            CancelNotificationCollapse();
+            StopControlsTimeout();
+            musicControlsVisible = false;
+            hoveredMusicButton = -1;
+            phase = VisualPhase.Seed;
+            waveformMotionTarget =
+                musicPaused ? 0.0 : 1.0;
+            SetSpringTarget(
+                Scale(SeedSize),
+                Scale(SeedSize),
+                0.0);
+            Cursor = Cursors.SizeAll;
+            StartFrameClock();
+            ApplyGeometry();
+            RequestRender();
+            UpdateDockPreview(screenPoint);
+        }
+
+        private void CalculateDockPlacement(
+            Point point,
+            out DockEdge edge,
+            out int position)
+        {
+            Screen screen = Screen.FromPoint(point);
+            Rectangle bounds = screen.WorkingArea;
+            int topDistance = Math.Abs(point.Y - bounds.Top);
+            int bottomDistance = Math.Abs(bounds.Bottom - point.Y);
+            int leftDistance = Math.Abs(point.X - bounds.Left);
+            int rightDistance = Math.Abs(bounds.Right - point.X);
+            edge = DockEdge.Top;
+            int shortest = topDistance;
+            if (bottomDistance < shortest)
+            {
+                edge = DockEdge.Bottom;
+                shortest = bottomDistance;
+            }
+            if (leftDistance < shortest)
+            {
+                edge = DockEdge.Left;
+                shortest = leftDistance;
+            }
+            if (rightDistance < shortest)
+            {
+                edge = DockEdge.Right;
+            }
+
+            if (edge == DockEdge.Top ||
+                edge == DockEdge.Bottom)
+            {
+                double horizontal = bounds.Width <= 0
+                    ? 0.5
+                    : (point.X - bounds.Left) /
+                        (double)bounds.Width;
+                position = horizontal < 1.0 / 3.0
+                    ? 0
+                    : (horizontal > 2.0 / 3.0 ? 2 : 1);
+            }
+            else
+            {
+                double vertical = bounds.Height <= 0
+                    ? 0.5
+                    : (point.Y - bounds.Top) /
+                        (double)bounds.Height;
+                position = vertical < 1.0 / 3.0
+                    ? 0
+                    : (vertical > 2.0 / 3.0 ? 2 : 1);
+            }
+        }
+
+        private void UpdateDockPreview(Point point)
+        {
+            DockEdge edge;
+            int position;
+            CalculateDockPlacement(point, out edge, out position);
+            Screen screen = Screen.FromPoint(point);
+            Rectangle area = screen.WorkingArea;
+            bool side = edge == DockEdge.Left || edge == DockEdge.Right;
+            int width = currentIsMedia
+                ? Scale(side ? SideMusicWidth : MusicWidth)
+                : Scale(side ? SideDetailWidth : DetailWidth);
+            int height = currentIsMedia
+                ? Scale(side ? SideMusicHeight : MusicHeight)
+                : Scale(side ? SideDetailHeight : DetailHeight);
+            int margin = Scale(7);
+            int left;
+            int top;
+            if (edge == DockEdge.Bottom)
+            {
+                left = PositionedHorizontal(
+                    area,
+                    width,
+                    margin,
+                    position);
+                top = area.Bottom - height - margin;
+            }
+            else if (edge == DockEdge.Left)
+            {
+                left = area.Left + margin;
+                top = PositionedVertical(
+                    area,
+                    height,
+                    margin,
+                    position);
+            }
+            else if (edge == DockEdge.Right)
+            {
+                left = area.Right - width - margin;
+                top = PositionedVertical(
+                    area,
+                    height,
+                    margin,
+                    position);
+            }
+            else
+            {
+                left = PositionedHorizontal(
+                    area,
+                    width,
+                    margin,
+                    position);
+                top = area.Top + margin;
+            }
+            dockPreview.ShowPreview(
+                new Rectangle(left, top, width, height),
+                Scale(24));
+        }
+
+        private void FinishWindowDrag()
+        {
+            dockScreenDevice =
+                Screen.FromPoint(dragLastScreen).DeviceName;
+            DockEdge next;
+            int nextPosition;
+            CalculateDockPlacement(
+                dragLastScreen,
+                out next,
+                out nextPosition);
+            dockEdge = next;
+            dockPosition = nextPosition;
+
+            draggingWindow = false;
+            snappingToDock = true;
+            dockSnapBlend = 0.0;
+            dockSnapVelocity = 0.0;
+            suppressClickUntil = DateTime.UtcNow.AddMilliseconds(320);
+            if (currentIsMedia)
+            {
+                if (mediaState != null && mediaState.IsPlaying)
+                {
+                    musicPaused = false;
+                    musicPauseEndPending = false;
+                    musicEnding = false;
+                }
+                phase = VisualPhase.Music;
+                musicControlsVisible = false;
+                waveformMotionTarget =
+                    musicPaused ? 0.0 : 1.0;
+                SetSpringTarget(
+                    MusicTargetWidth,
+                    Scale(SideDocked
+                        ? SideMusicHeight
+                        : MusicHeight),
+                    0.0);
+                if (musicPaused && !musicPinned)
+                {
+                    musicPauseEndPending = true;
+                    QueueAction(BeginMusicEnd, 2500);
+                }
+            }
+            else
+            {
+                phase = VisualPhase.Detail;
+                SetSpringTarget(
+                    NotificationTargetWidth(false),
+                    NotificationTargetHeight(false),
+                    1.0);
+                ScheduleNotificationCollapse(5200);
+            }
+            StartFrameClock();
+            dockPreview.HidePreview();
+            ApplyGeometry();
+            RequestRender();
+            EventHandler handler = DockEdgeChanged;
+            if (handler != null)
+            {
+                handler(this, EventArgs.Empty);
+            }
+        }
+
+        private static bool TryParseDockEdge(
+            string value,
+            out DockEdge edge)
+        {
+            if (string.Equals(value, "bottom", StringComparison.OrdinalIgnoreCase))
+            {
+                edge = DockEdge.Bottom;
+                return true;
+            }
+            if (string.Equals(value, "left", StringComparison.OrdinalIgnoreCase))
+            {
+                edge = DockEdge.Left;
+                return true;
+            }
+            if (string.Equals(value, "right", StringComparison.OrdinalIgnoreCase))
+            {
+                edge = DockEdge.Right;
+                return true;
+            }
+            if (string.Equals(value, "top", StringComparison.OrdinalIgnoreCase))
+            {
+                edge = DockEdge.Top;
+                return true;
+            }
+            edge = DockEdge.Top;
+            return false;
+        }
+
+        private void ApplyClickThroughStyle()
+        {
+            if (!IsHandleCreated || IsDisposed)
+            {
+                return;
+            }
+            const int extendedStyle = -20;
+            const int transparentStyle = 0x00000020;
+            int style = GetWindowLong(Handle, extendedStyle);
+            int next = clickThroughEnabled
+                ? style | transparentStyle
+                : style & ~transparentStyle;
+            if (next != style)
+            {
+                SetWindowLong(Handle, extendedStyle, next);
+                SetWindowPos(
+                    Handle,
+                    new IntPtr(-1),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0x0001 | 0x0002 | 0x0010 | 0x0020);
             }
         }
 
@@ -2894,8 +4474,10 @@ namespace SmartWindow
         {
             musicControlsVisible = true;
             SetSpringTarget(
-                Scale(MusicWidth),
-                Scale(MusicExpandedHeight),
+                MusicTargetWidth,
+                Scale(SideDocked
+                    ? SideMusicExpandedHeight
+                    : MusicExpandedHeight),
                 0.0);
             ResetControlsTimeout();
             RequestRender();
@@ -2941,8 +4523,10 @@ namespace SmartWindow
                 phase == VisualPhase.Music)
             {
                 SetSpringTarget(
-                    Scale(MusicWidth),
-                    Scale(MusicHeight),
+                    MusicTargetWidth,
+                    Scale(SideDocked
+                        ? SideMusicHeight
+                        : MusicHeight),
                     0.0);
                 RequestRender();
             }
@@ -2967,17 +4551,44 @@ namespace SmartWindow
 
         private Rectangle MusicButtonBounds(int index)
         {
-            int padding = Scale(24);
-            int gap = Scale(12);
+            int padding = Scale(SideDocked ? 18 : 24);
+            int gap = Scale(SideDocked ? 10 : 12);
             int width = Math.Max(
                 Scale(42),
                 (ClientSize.Width - padding * 2 - gap * 2) / 3);
             int left = padding + index * (width + gap);
             return new Rectangle(
                 left,
-                Scale(89),
+                Scale(SideDocked ? 176 : 89),
                 width,
-                Scale(50));
+                Scale(SideDocked ? 62 : 50));
+        }
+
+        private Rectangle PlaybackProgressBounds()
+        {
+            return new Rectangle(
+                Scale(24),
+                Scale(SideDocked ? 252 : 149),
+                Math.Max(1, ClientSize.Width - Scale(48)),
+                Scale(8));
+        }
+
+        private Rectangle VolumeTrackBounds()
+        {
+            return new Rectangle(
+                Scale(24),
+                Scale(SideDocked ? 294 : 188),
+                Math.Max(1, ClientSize.Width - Scale(88)),
+                Scale(8));
+        }
+
+        private Rectangle SoundSettingsBounds()
+        {
+            return new Rectangle(
+                ClientSize.Width - Scale(50),
+                Scale(SideDocked ? 282 : 176),
+                Scale(30),
+                Scale(30));
         }
 
         public void RefreshLanguage()
@@ -3091,8 +4702,52 @@ namespace SmartWindow
             public byte AlphaFormat;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BitmapInfoHeader
+        {
+            public uint Size;
+            public int Width;
+            public int Height;
+            public ushort Planes;
+            public ushort BitCount;
+            public uint Compression;
+            public uint ImageSize;
+            public int XPelsPerMeter;
+            public int YPelsPerMeter;
+            public uint ColorsUsed;
+            public uint ColorsImportant;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BitmapInfo
+        {
+            public BitmapInfoHeader Header;
+            public uint Colors;
+        }
+
         [DllImport("dwmapi.dll")]
         private static extern int DwmFlush();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(
+            IntPtr window,
+            int index);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(
+            IntPtr window,
+            int index,
+            int newStyle);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowPos(
+            IntPtr window,
+            IntPtr insertAfter,
+            int x,
+            int y,
+            int width,
+            int height,
+            uint flags);
 
         [DllImport("winmm.dll", EntryPoint = "timeBeginPeriod")]
         private static extern uint timeBeginPeriod(uint milliseconds);
@@ -3129,6 +4784,15 @@ namespace SmartWindow
         private static extern IntPtr CreateCompatibleDC(IntPtr dc);
 
         [DllImport("gdi32.dll")]
+        private static extern IntPtr CreateDIBSection(
+            IntPtr dc,
+            ref BitmapInfo bitmapInfo,
+            uint usage,
+            out IntPtr bits,
+            IntPtr section,
+            uint offset);
+
+        [DllImport("gdi32.dll")]
         private static extern IntPtr SelectObject(IntPtr dc, IntPtr graphicsObject);
 
         [DllImport("gdi32.dll")]
@@ -3139,12 +4803,14 @@ namespace SmartWindow
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing)
+            if (disposing && !resourcesDisposed)
             {
+                resourcesDisposed = true;
                 StopFrameClock();
                 sequenceTimer.Dispose();
                 controlsTimer.Dispose();
                 mouseHook.Dispose();
+                dockPreview.Dispose();
                 microFont.Dispose();
                 titleFont.Dispose();
                 bodyFont.Dispose();
@@ -3154,19 +4820,125 @@ namespace SmartWindow
                     albumArtwork.Dispose();
                     albumArtwork = null;
                 }
-                if (layeredGraphics != null)
-                {
-                    layeredGraphics.Dispose();
-                    layeredGraphics = null;
-                }
-                if (layeredBitmap != null)
-                {
-                    layeredBitmap.Dispose();
-                    layeredBitmap = null;
-                }
+                ReleaseLayeredSurface();
                 frameStopEvent.Dispose();
             }
             base.Dispose(disposing);
+        }
+    }
+
+    internal sealed class DockPreviewForm : Form
+    {
+        private int cornerRadius = 24;
+
+        public DockPreviewForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            BackColor = Color.FromArgb(90, 210, 236);
+            Opacity = 0.24;
+            DoubleBuffered = true;
+            AutoScaleMode = AutoScaleMode.None;
+        }
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                parameters.ExStyle |= 0x08000000;
+                parameters.ExStyle |= 0x00000080;
+                parameters.ExStyle |= 0x00080000;
+                parameters.ExStyle |= 0x00000020;
+                return parameters;
+            }
+        }
+
+        public void ShowPreview(Rectangle bounds, int radius)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+            cornerRadius = Math.Max(2, radius);
+            if (!Visible)
+            {
+                Show();
+            }
+            if (Bounds != bounds)
+            {
+                Bounds = bounds;
+                using (GraphicsPath path = CreateRoundedPath(
+                    new Rectangle(0, 0, bounds.Width, bounds.Height),
+                    cornerRadius))
+                {
+                    Region previous = Region;
+                    Region = new Region(path);
+                    if (previous != null)
+                    {
+                        previous.Dispose();
+                    }
+                }
+            }
+            Invalidate();
+        }
+
+        public void HidePreview()
+        {
+            if (!IsDisposed && Visible)
+            {
+                Hide();
+            }
+        }
+
+        private static GraphicsPath CreateRoundedPath(
+            Rectangle bounds,
+            int radius)
+        {
+            int diameter = Math.Max(2, radius * 2);
+            GraphicsPath path = new GraphicsPath();
+            Rectangle arc = new Rectangle(
+                bounds.Location,
+                new Size(diameter, diameter));
+            path.AddArc(arc, 180, 90);
+            arc.X = bounds.Right - diameter;
+            path.AddArc(arc, 270, 90);
+            arc.Y = bounds.Bottom - diameter;
+            path.AddArc(arc, 0, 90);
+            arc.X = bounds.Left;
+            path.AddArc(arc, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle bounds = new Rectangle(
+                1,
+                1,
+                Math.Max(1, ClientSize.Width - 2),
+                Math.Max(1, ClientSize.Height - 2));
+            using (GraphicsPath path = CreateRoundedPath(
+                bounds,
+                cornerRadius))
+            using (SolidBrush fill = new SolidBrush(
+                Color.FromArgb(70, 220, 244)))
+            using (Pen border = new Pen(
+                Color.FromArgb(230, 245, 255),
+                2f))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
         }
     }
 }

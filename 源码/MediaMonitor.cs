@@ -18,6 +18,8 @@ namespace SmartWindow
         public string Album;
         public string Signature;
         public string ArtworkPath;
+        public double PositionSeconds;
+        public double DurationSeconds;
     }
 
     internal sealed class MediaMonitor : IDisposable
@@ -44,6 +46,11 @@ namespace SmartWindow
                 Process current = process;
                 return current != null && !current.HasExited;
             }
+        }
+
+        public string CurrentAppId
+        {
+            get { return lastAppId ?? ""; }
         }
 
         public void Start()
@@ -148,6 +155,23 @@ namespace SmartWindow
                     state.Album = Decode(parts[5]);
                     state.Signature = Decode(parts[6]);
                     state.ArtworkPath = Decode(parts[7]);
+                    if (parts.Length >= 10)
+                    {
+                        double position;
+                        double duration;
+                        double.TryParse(
+                            parts[8],
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out position);
+                        double.TryParse(
+                            parts[9],
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out duration);
+                        state.PositionSeconds = Math.Max(0, position);
+                        state.DurationSeconds = Math.Max(0, duration);
+                    }
                     state.AppName = FriendlyMediaAppName(state.AppId);
                     lastAppId = state.AppId;
 
@@ -192,6 +216,18 @@ namespace SmartWindow
                 {
                     SendMediaKey(action);
                 }
+            });
+        }
+
+        public void SendSeek(double seconds)
+        {
+            string command = "seek:" +
+                Math.Max(0, seconds).ToString(
+                    "0.###",
+                    System.Globalization.CultureInfo.InvariantCulture);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                TrySendSessionCommand(command);
             });
         }
 

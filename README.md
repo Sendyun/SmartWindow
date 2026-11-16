@@ -1,6 +1,6 @@
 # 智慧窗 / SmartWindow
 
-**Ver 1.0.1**
+**Ver 1.1.0**
 
 智慧窗是一款面向 Windows 11 的顶部通知与音乐控制浮窗工具。它将系统通知和当前媒体信息显示在屏幕顶部中央，并提供类似灵动岛的展开、收拢与音乐控制体验。
 
@@ -10,10 +10,14 @@
 - 显示当前媒体、专辑封面、歌曲信息与动态波形。
 - 提供上一首、暂停/继续、下一首控制。
 - 支持透明智慧窗、质感增强、光粒子和粒子擦除动画。
+- 支持拖动收拢圆形、四边自动停靠和停靠位置记忆。
+- 支持防遮挡鼠标穿透、多显示器、DPI 和任务栏避让。
+- 支持通知历史、应用过滤和全屏自动静默。
+- 支持媒体进度跳转、系统音量和声音设备设置。
 - 支持控制台透明度与 80%–120% 窗口缩放。
 - 支持开机自启动。
 - 支持中文、English、日本語、한국어、Русский、Français。
-- 支持 `Ctrl+M` 音乐模式与 `Ctrl+M+L` 音乐窗常驻快捷键。
+- 支持 `Ctrl+M` 音乐模式、`Ctrl+M+L` 音乐窗常驻和 `Ctrl+Alt+N` 通知历史。
 
 ## 直接使用
 
@@ -23,19 +27,19 @@
 
 Microsoft Store 安装程序：
 
-- [`releases/1.0.1/SmartWindow-Setup-x64.exe`](releases/1.0.1/SmartWindow-Setup-x64.exe)
+- [`releases/1.1.0/SmartWindow-Setup-x64.exe`](releases/1.1.0/SmartWindow-Setup-x64.exe)
 - 静默安装：`SmartWindow-Setup-x64.exe /S`
 - 静默卸载：`Uninstall SmartWindow.exe /uninstall /S`
 
 商店提交使用的固定版本下载地址：
 
 ```text
-https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.0.1/SmartWindow-Setup-x64.exe
+https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.1.0/SmartWindow-Setup-x64.exe
 ```
 
 Microsoft Store MSIX 上传文件：
 
-- `SmartWindow_1.0.1.0_x64.msixupload`
+- `SmartWindow_1.1.0.0_x64.msixupload`
 - Package Identity：`SendyunTechnologyUnit.SmartWindow`
 - Publisher：`CN=4591EE90-EA8E-423D-84B2-08FC9222DF54`
 - 架构：`x64`

@@ -3,6 +3,7 @@ using System.Drawing;
 using System.Drawing.Text;
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
 
 namespace SmartWindow
 {
@@ -126,6 +127,35 @@ namespace SmartWindow
             }
         }
 
+        public static Bitmap LoadDonationAlipay()
+        {
+            return LoadBitmapResource(
+                "SmartWindow.Resources.donation-alipay.jpg");
+        }
+
+        public static Bitmap LoadDonationWechat()
+        {
+            return LoadBitmapResource(
+                "SmartWindow.Resources.donation-wechat.jpg");
+        }
+
+        private static Bitmap LoadBitmapResource(string resourceName)
+        {
+            Assembly assembly = Assembly.GetExecutingAssembly();
+            using (Stream stream =
+                assembly.GetManifestResourceStream(resourceName))
+            {
+                if (stream == null)
+                {
+                    return null;
+                }
+                using (Image source = Image.FromStream(stream))
+                {
+                    return new Bitmap(source);
+                }
+            }
+        }
+
         private static void ExtractResource(
             string resourceName,
             string destination)
@@ -138,14 +168,69 @@ namespace SmartWindow
                     throw new InvalidOperationException(
                         "Embedded resource is missing: " + resourceName);
                 }
+
+                if (File.Exists(destination) &&
+                    resource.Length == new FileInfo(destination).Length &&
+                    ResourceHashEquals(resource, destination))
+                {
+                    return;
+                }
+
+                string temporary = destination + ".tmp";
                 using (FileStream output = new FileStream(
-                    destination,
+                    temporary,
                     FileMode.Create,
                     FileAccess.Write,
-                    FileShare.Read))
+                    FileShare.None))
                 {
                     resource.CopyTo(output);
                 }
+                File.Copy(temporary, destination, true);
+                File.Delete(temporary);
+            }
+        }
+
+        private static bool ResourceHashEquals(
+            Stream resource,
+            string destination)
+        {
+            try
+            {
+                byte[] expected;
+                using (SHA256 algorithm = SHA256.Create())
+                {
+                    expected = algorithm.ComputeHash(resource);
+                }
+                byte[] actual;
+                using (FileStream file = new FileStream(
+                    destination,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                using (SHA256 algorithm = SHA256.Create())
+                {
+                    actual = algorithm.ComputeHash(file);
+                }
+                if (expected.Length != actual.Length)
+                {
+                    return false;
+                }
+                for (int index = 0; index < expected.Length; index++)
+                {
+                    if (expected[index] != actual[index])
+                    {
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                resource.Position = 0;
             }
         }
     }

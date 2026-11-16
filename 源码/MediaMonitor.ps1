@@ -98,6 +98,7 @@ while ($true) {
         }
 
         $playback = $playingSession.GetPlaybackInfo()
+        $timeline = $playingSession.GetTimelineProperties()
         $properties = Await-WinRt ($playingSession.TryGetMediaPropertiesAsync()) $propertiesType
         $appId = [string]$playingSession.SourceAppUserModelId
         $title = [string]$properties.Title
@@ -106,9 +107,11 @@ while ($true) {
         $signature = $appId + "`n" + $title + "`n" + $artist + "`n" + $album
 
         if ($signature -ne $lastArtworkSignature) {
+            $artworkSaved = $false
             if ($null -ne $properties.Thumbnail) {
                 try {
                     Save-Thumbnail $properties.Thumbnail $artPath
+                    $artworkSaved = $true
                 }
                 catch {
                     if ([System.IO.File]::Exists($artPath)) {
@@ -119,13 +122,26 @@ while ($true) {
             elseif ([System.IO.File]::Exists($artPath)) {
                 [System.IO.File]::Delete($artPath)
             }
-            $lastArtworkSignature = $signature
+            # The media session may publish its thumbnail a few polls after
+            # the title changes. Keep retrying until the image was saved.
+            if ($artworkSaved) {
+                $lastArtworkSignature = $signature
+            }
         }
 
         $availableArtPath = ""
         if ([System.IO.File]::Exists($artPath)) {
             $availableArtPath = $artPath
         }
+        $positionSeconds = [math]::Round(
+            $timeline.Position.TotalSeconds,
+            0)
+        $durationSeconds = [math]::Max(
+            0,
+            [math]::Round(
+                ($timeline.EndTime - $timeline.StartTime).TotalSeconds,
+                0))
+        $invariant = [System.Globalization.CultureInfo]::InvariantCulture
 
         $line = "SW1`t1`t" +
             (Encode-Text $appId) + "`t" +
@@ -133,7 +149,9 @@ while ($true) {
             (Encode-Text $artist) + "`t" +
             (Encode-Text $album) + "`t" +
             (Encode-Text $signature) + "`t" +
-            (Encode-Text $availableArtPath)
+            (Encode-Text $availableArtPath) + "`t" +
+            $positionSeconds.ToString($invariant) + "`t" +
+            $durationSeconds.ToString($invariant)
 
         if ($line -ne $lastLine) {
             $lastLine = $line

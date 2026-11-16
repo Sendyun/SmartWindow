@@ -18,6 +18,8 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "/out:$outputRoot\SmartWindow.exe" `
     "/resource:$outputRoot\logo.png,SmartWindow.Resources.logo.png" `
     "/resource:$outputRoot\github.png,SmartWindow.Resources.github.png" `
+    "/resource:$outputRoot\donation-alipay.jpg,SmartWindow.Resources.donation-alipay.jpg" `
+    "/resource:$outputRoot\donation-wechat.jpg,SmartWindow.Resources.donation-wechat.jpg" `
     "/resource:$outputRoot\HYWenHei-85W.otf,SmartWindow.Resources.HYWenHei-85W.otf" `
     "/resource:$outputRoot\MediaMonitor.ps1,SmartWindow.Resources.MediaMonitor.ps1" `
     "/resource:$outputRoot\MediaCommand.ps1,SmartWindow.Resources.MediaCommand.ps1" `
@@ -32,8 +34,10 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "$sourceRoot\GlobalHotkeys.cs" `
     "$sourceRoot\GlobalMouseHook.cs" `
     "$sourceRoot\ConsoleForm.cs" `
+    "$sourceRoot\ManagementForms.cs" `
     "$sourceRoot\EmbeddedAssets.cs" `
     "$sourceRoot\Localization.cs" `
+    "$sourceRoot\DonationIntegrity.cs" `
     "$sourceRoot\AssemblyInfo.cs"
 
 if ($LASTEXITCODE -ne 0) {

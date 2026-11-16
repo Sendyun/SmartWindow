@@ -9,7 +9,7 @@
   <Identity
     Name="SendyunTechnologyUnit.SmartWindow"
     Publisher="CN=4591EE90-EA8E-423D-84B2-08FC9222DF54"
-    Version="1.0.1.0"
+    Version="1.1.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>

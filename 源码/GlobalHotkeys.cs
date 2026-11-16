@@ -17,9 +17,11 @@ namespace SmartWindow
         private const int VkRWin = 0x5C;
         private const int VkM = 0x4D;
         private const int VkL = 0x4C;
+        private const int VkN = 0x4E;
 
         private readonly Action toggleMusicMode;
         private readonly Action toggleMusicPersistent;
+        private readonly Action openNotificationHistory;
         private readonly LowLevelKeyboardProc hookCallback;
         private readonly System.Windows.Forms.Timer sequenceTimer;
         private IntPtr hookHandle;
@@ -29,10 +31,12 @@ namespace SmartWindow
 
         public GlobalHotkeys(
             Action toggleMusicMode,
-            Action toggleMusicPersistent)
+            Action toggleMusicPersistent,
+            Action openNotificationHistory)
         {
             this.toggleMusicMode = toggleMusicMode;
             this.toggleMusicPersistent = toggleMusicPersistent;
+            this.openNotificationHistory = openNotificationHistory;
             hookCallback = KeyboardHook;
 
             sequenceTimer = new System.Windows.Forms.Timer();
@@ -86,11 +90,20 @@ namespace SmartWindow
                 {
                     bool controlDown =
                         (GetAsyncKeyState(VkControl) & 0x8000) != 0;
+                    bool altDown =
+                        (GetAsyncKeyState(VkMenu) & 0x8000) != 0;
                     bool competingModifier =
                         (GetAsyncKeyState(VkShift) & 0x8000) != 0 ||
-                        (GetAsyncKeyState(VkMenu) & 0x8000) != 0 ||
+                        altDown ||
                         (GetAsyncKeyState(VkLWin) & 0x8000) != 0 ||
                         (GetAsyncKeyState(VkRWin) & 0x8000) != 0;
+
+                    if (controlDown && altDown &&
+                        data.KeyCode == VkN)
+                    {
+                        openNotificationHistory();
+                        return new IntPtr(1);
+                    }
 
                     if (controlDown && !competingModifier &&
                         data.KeyCode == VkM &&

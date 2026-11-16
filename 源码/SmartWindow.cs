@@ -24,6 +24,131 @@ namespace SmartWindow
         public bool IsMedia;
         public bool IsSizePreview;
         public string ArtworkPath;
+        public string MediaSignature;
+    }
+
+    internal sealed class NotificationHistoryEntry
+    {
+        public DateTime ReceivedAt;
+        public string AppName;
+        public string Title;
+        public string Body;
+        public bool WasFiltered;
+        public bool WasSuppressed;
+    }
+
+    internal sealed class FullscreenDetector
+    {
+        private const int QunsBusy = 2;
+        private const int QunsD3DFullScreen = 3;
+        private const int QunsPresentationMode = 4;
+
+        public bool IsSuppressed()
+        {
+            int state;
+            if (SHQueryUserNotificationState(out state) == 0 &&
+                (state == QunsBusy ||
+                 state == QunsD3DFullScreen ||
+                 state == QunsPresentationMode))
+            {
+                return true;
+            }
+
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero)
+            {
+                return false;
+            }
+            string className = WindowClassName(foreground);
+            if (className == "Progman" ||
+                className == "WorkerW" ||
+                className == "Shell_TrayWnd" ||
+                className == "MultitaskingViewFrame")
+            {
+                return false;
+            }
+
+            NativeRect windowRect;
+            if (!GetWindowRect(foreground, out windowRect) ||
+                windowRect.Right <= windowRect.Left ||
+                windowRect.Bottom <= windowRect.Top)
+            {
+                return false;
+            }
+            IntPtr monitor = MonitorFromWindow(
+                foreground,
+                2);
+            MonitorInfo monitorInfo = new MonitorInfo();
+            monitorInfo.Size = Marshal.SizeOf(monitorInfo);
+            if (!GetMonitorInfo(monitor, ref monitorInfo))
+            {
+                return false;
+            }
+            NativeRect monitorRect = monitorInfo.Monitor;
+            int width = monitorRect.Right - monitorRect.Left;
+            int height = monitorRect.Bottom - monitorRect.Top;
+            int windowWidth = windowRect.Right - windowRect.Left;
+            int windowHeight = windowRect.Bottom - windowRect.Top;
+            return windowRect.Left <= monitorRect.Left + 2 &&
+                windowRect.Top <= monitorRect.Top + 2 &&
+                windowRect.Right >= monitorRect.Right - 2 &&
+                windowRect.Bottom >= monitorRect.Bottom - 2 &&
+                windowWidth >= width * 0.96 &&
+                windowHeight >= height * 0.96;
+        }
+
+        private static string WindowClassName(IntPtr window)
+        {
+            StringBuilder builder = new StringBuilder(256);
+            GetClassName(window, builder, builder.Capacity);
+            return builder.ToString();
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct MonitorInfo
+        {
+            public int Size;
+            public NativeRect Monitor;
+            public NativeRect Work;
+            public uint Flags;
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern int SHQueryUserNotificationState(
+            out int state);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(
+            IntPtr window,
+            out NativeRect rectangle);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(
+            IntPtr window,
+            StringBuilder className,
+            int maximumCount);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(
+            IntPtr window,
+            uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetMonitorInfo(
+            IntPtr monitor,
+            ref MonitorInfo info);
     }
 
     internal static class Program
@@ -34,6 +159,11 @@ namespace SmartWindow
             bool restoreOnly = HasArgument(args, "--restore");
             bool muteBanners = !HasArgument(args, "--no-mute");
             bool showConsole = !HasArgument(args, "--background");
+
+            if (!DonationIntegrityGuard.EnforceOrShutdown())
+            {
+                return;
+            }
 
             bool firstInstance;
             using (Mutex instanceMutex = new Mutex(
@@ -106,6 +236,7 @@ namespace SmartWindow
                 catch (Exception exception)
                 {
                     Logger.Write(exception.ToString());
+                    CrashGuard.RegisterCrash();
                     muter.RestoreBackup();
                     if (!restoreOnly)
                     {
@@ -159,6 +290,16 @@ namespace SmartWindow
                 try
                 {
                     Directory.CreateDirectory(DataDirectory);
+                    FileInfo current = new FileInfo(LogPath);
+                    if (current.Exists && current.Length > 5 * 1024 * 1024)
+                    {
+                        string archive = LogPath + ".1";
+                        if (File.Exists(archive))
+                        {
+                            File.Delete(archive);
+                        }
+                        File.Move(LogPath, archive);
+                    }
                     File.AppendAllText(
                         LogPath,
                         DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") +
@@ -170,6 +311,244 @@ namespace SmartWindow
                 catch
                 {
                     // Logging must never prevent the overlay from shutting down.
+                }
+            }
+        }
+    }
+
+    internal static class CrashGuard
+    {
+        private static readonly string DirectoryPath = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "SmartWindow");
+        private static readonly string CountPath = Path.Combine(
+            DirectoryPath,
+            "crash-count.dat");
+        private static readonly string SafeModePath = Path.Combine(
+            DirectoryPath,
+            "safe-mode.flag");
+
+        public static bool IsSafeMode()
+        {
+            return File.Exists(SafeModePath);
+        }
+
+        public static void RegisterCrash()
+        {
+            try
+            {
+                Directory.CreateDirectory(DirectoryPath);
+                int count = 0;
+                if (File.Exists(CountPath))
+                {
+                    int.TryParse(File.ReadAllText(CountPath), out count);
+                }
+                count++;
+                File.WriteAllText(CountPath, count.ToString());
+                if (count >= 3)
+                {
+                    File.WriteAllText(
+                        SafeModePath,
+                        DateTime.Now.ToString("O"));
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        public static void MarkHealthy()
+        {
+            try
+            {
+                if (File.Exists(CountPath))
+                {
+                    File.Delete(CountPath);
+                }
+                if (File.Exists(SafeModePath))
+                {
+                    File.Delete(SafeModePath);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    internal static class SystemVolume
+    {
+        public static double Get()
+        {
+            try
+            {
+                using (AudioEndpoint endpoint =
+                    AudioEndpoint.Create())
+                {
+                    float value;
+                    return endpoint.Volume.GetMasterVolumeLevelScalar(
+                        out value) == 0
+                        ? Math.Max(0.0, Math.Min(1.0, value))
+                        : 0.5;
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("SystemVolume.Get: " + exception);
+                return 0.5;
+            }
+        }
+
+        public static void Set(double value)
+        {
+            try
+            {
+                using (AudioEndpoint endpoint =
+                    AudioEndpoint.Create())
+                {
+                    Guid context = Guid.Empty;
+                    endpoint.Volume.SetMasterVolumeLevelScalar(
+                        (float)Math.Max(0.0, Math.Min(1.0, value)),
+                        ref context);
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("SystemVolume.Set: " + exception);
+            }
+        }
+
+        [ComImport]
+        [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+        private class MMDeviceEnumeratorComObject
+        {
+        }
+
+        [ComImport]
+        [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDeviceEnumerator
+        {
+            [PreserveSig]
+            int EnumAudioEndpoints(
+                int dataFlow,
+                int stateMask,
+                out IntPtr devices);
+            [PreserveSig]
+            int GetDefaultAudioEndpoint(
+                int dataFlow,
+                int role,
+                out IMMDevice endpoint);
+            [PreserveSig]
+            int GetDevice(string id, out IMMDevice device);
+            [PreserveSig]
+            int RegisterEndpointNotificationCallback(IntPtr client);
+            [PreserveSig]
+            int UnregisterEndpointNotificationCallback(IntPtr client);
+        }
+
+        [ComImport]
+        [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IMMDevice
+        {
+            [PreserveSig]
+            int Activate(
+                ref Guid interfaceId,
+                uint classContext,
+                IntPtr activationParameters,
+                out IntPtr interfacePointer);
+            [PreserveSig]
+            int OpenPropertyStore(
+                uint access,
+                out IntPtr properties);
+            [PreserveSig]
+            int GetId(out IntPtr id);
+            [PreserveSig]
+            int GetState(out uint state);
+        }
+
+        [ComImport]
+        [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface IAudioEndpointVolume
+        {
+            [PreserveSig]
+            int RegisterControlChangeNotify(IntPtr notify);
+            [PreserveSig]
+            int UnregisterControlChangeNotify(IntPtr notify);
+            [PreserveSig]
+            int GetChannelCount(out uint channelCount);
+            [PreserveSig]
+            int SetMasterVolumeLevel(
+                float level,
+                ref Guid eventContext);
+            [PreserveSig]
+            int SetMasterVolumeLevelScalar(
+                float level,
+                ref Guid eventContext);
+            [PreserveSig]
+            int GetMasterVolumeLevel(out float level);
+            [PreserveSig]
+            int GetMasterVolumeLevelScalar(out float level);
+        }
+
+        private sealed class AudioEndpoint : IDisposable
+        {
+            public IAudioEndpointVolume Volume;
+            private IMMDevice device;
+
+            public static AudioEndpoint Create()
+            {
+                IMMDeviceEnumerator enumerator =
+                    (IMMDeviceEnumerator)
+                    (object)new MMDeviceEnumeratorComObject();
+                IMMDevice device;
+                int result = enumerator.GetDefaultAudioEndpoint(
+                    0,
+                    1,
+                    out device);
+                if (result != 0 || device == null)
+                {
+                    throw new InvalidOperationException(
+                        "No default audio endpoint.");
+                }
+                Guid interfaceId =
+                    typeof(IAudioEndpointVolume).GUID;
+                IntPtr pointer;
+                result = device.Activate(
+                    ref interfaceId,
+                    23,
+                    IntPtr.Zero,
+                    out pointer);
+                if (result != 0 || pointer == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException(
+                        "Audio endpoint activation failed.");
+                }
+                AudioEndpoint endpoint = new AudioEndpoint();
+                endpoint.device = device;
+                endpoint.Volume =
+                    (IAudioEndpointVolume)
+                    Marshal.GetObjectForIUnknown(pointer);
+                Marshal.Release(pointer);
+                return endpoint;
+            }
+
+            public void Dispose()
+            {
+                if (Volume != null &&
+                    Marshal.IsComObject(Volume))
+                {
+                    Marshal.ReleaseComObject(Volume);
+                    Volume = null;
+                }
+                if (device != null &&
+                    Marshal.IsComObject(device))
+                {
+                    Marshal.ReleaseComObject(device);
+                    device = null;
                 }
             }
         }
@@ -1131,13 +1510,23 @@ namespace SmartWindow
         private readonly ToolStripMenuItem showItem;
         private readonly ToolStripMenuItem demoItem;
         private readonly ToolStripMenuItem pauseItem;
+        private readonly ToolStripMenuItem historyItem;
+        private readonly ToolStripMenuItem filtersItem;
+        private readonly ToolStripMenuItem supportItem;
         private readonly ToolStripMenuItem musicModeItem;
         private readonly ToolStripMenuItem musicPersistentItem;
         private readonly ToolStripMenuItem exitItem;
         private readonly Icon generatedIcon;
         private readonly System.Windows.Forms.Timer bannerRefreshTimer;
         private readonly System.Windows.Forms.Timer settingsSaveTimer;
+        private readonly System.Windows.Forms.Timer healthTimer;
         private readonly string settingsPath;
+        private readonly string historyPath;
+        private readonly FullscreenDetector fullscreenDetector;
+        private readonly List<NotificationHistoryEntry> notificationHistory =
+            new List<NotificationHistoryEntry>();
+        private readonly HashSet<string> filteredApps =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly bool showConsole;
         private bool paused;
         private bool musicMode;
@@ -1147,6 +1536,16 @@ namespace SmartWindow
         private double uiScale = 1.0;
         private double consoleOpacity = 0.5;
         private bool autoStart;
+        private bool movementEnabled;
+        private bool clickThroughEnabled;
+        private string dockEdge = "top";
+        private int dockPosition = 1;
+        private string dockScreen = "";
+        private string screenSignature = "";
+        private bool displaySuppressed;
+        private bool safeMode;
+        private int volumeHealthCounter;
+        private DateTime startedAt = DateTime.UtcNow;
         private bool cleanedUp;
 
         public IslandApplication(
@@ -1166,10 +1565,33 @@ namespace SmartWindow
                     Environment.SpecialFolder.LocalApplicationData),
                 "SmartWindow",
                 "settings.ini");
+            historyPath = Path.Combine(
+                Path.GetDirectoryName(settingsPath),
+                "notification-history.dat");
+            fullscreenDetector = new FullscreenDetector();
+            LoadNotificationHistory();
+            LoadFilteredApps();
             Localization.SetLanguage(ReadLanguage());
             transparentWindow = ReadTransparentWindow();
             qualityEnhancement =
                 transparentWindow && ReadBooleanSetting("qualityEnhancement");
+            movementEnabled = ReadBooleanSetting("windowMovement");
+            clickThroughEnabled = ReadBooleanSetting("clickThrough");
+            safeMode = CrashGuard.IsSafeMode();
+            if (safeMode)
+            {
+                transparentWindow = false;
+                qualityEnhancement = false;
+                movementEnabled = false;
+                clickThroughEnabled = false;
+            }
+            if (clickThroughEnabled)
+            {
+                movementEnabled = false;
+            }
+            dockEdge = ReadDockEdge();
+            dockPosition = ReadDockPosition();
+            dockScreen = ReadStringSetting("dockScreen");
             consoleOpacity = ReadConsoleOpacity();
             autoStart = AutoStartManager.IsEnabled();
             AutoStartManager.RefreshCommandIfEnabled();
@@ -1201,6 +1623,12 @@ namespace SmartWindow
             musicPersistentItem.CheckOnClick = true;
             pauseItem = new ToolStripMenuItem(
                 Localization.Get("pauseReceive"));
+            historyItem = new ToolStripMenuItem(
+                Localization.Get("notificationHistory"));
+            filtersItem = new ToolStripMenuItem(
+                Localization.Get("appFilters"));
+            supportItem = new ToolStripMenuItem(
+                Localization.Get("sponsorCoffeeButton"));
             exitItem = new ToolStripMenuItem(
                 Localization.Get("exitRestore"));
 
@@ -1217,6 +1645,18 @@ namespace SmartWindow
                 SetMusicPersistent(musicPersistentItem.Checked);
             };
             pauseItem.Click += delegate { TogglePause(); };
+            historyItem.Click += delegate
+            {
+                OpenNotificationManagement(true);
+            };
+            filtersItem.Click += delegate
+            {
+                OpenNotificationManagement(false);
+            };
+            supportItem.Click += delegate
+            {
+                OpenDonatePage();
+            };
             exitItem.Click += delegate { ExitThread(); };
             menu.Items.Add(consoleItem);
             menu.Items.Add(showItem);
@@ -1224,6 +1664,9 @@ namespace SmartWindow
             menu.Items.Add(musicModeItem);
             menu.Items.Add(musicPersistentItem);
             menu.Items.Add(pauseItem);
+            menu.Items.Add(historyItem);
+            menu.Items.Add(filtersItem);
+            menu.Items.Add(supportItem);
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add(exitItem);
 
@@ -1248,6 +1691,48 @@ namespace SmartWindow
             {
                 mediaMonitor.SendCommand(action);
             };
+            island.VolumeChangeRequested += delegate(
+                object sender,
+                double value)
+            {
+                SystemVolume.Set(value);
+                island.SetVolume(SystemVolume.Get());
+            };
+            island.SeekRequested += delegate(
+                object sender,
+                double seconds)
+            {
+                mediaMonitor.SendSeek(seconds);
+            };
+            island.SoundSettingsRequested += delegate
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(
+                        "ms-settings:sound");
+                }
+                catch (Exception exception)
+                {
+                    Logger.Write("Open sound settings: " + exception);
+                }
+            };
+            island.MediaSourceOpenRequested += delegate
+            {
+                string appId = mediaMonitor.CurrentAppId;
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(appId))
+                    {
+                        System.Diagnostics.Process.Start(
+                            "explorer.exe",
+                            "shell:AppsFolder\\" + appId);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    Logger.Write("Open media source: " + exception);
+                }
+            };
             island.MusicWindowCloseRequested += delegate
             {
                 if (musicMode)
@@ -1259,6 +1744,19 @@ namespace SmartWindow
             island.SetUiScale(uiScale);
             island.SetGlassMode(transparentWindow);
             island.SetQualityEnhancement(qualityEnhancement);
+            island.SetVolume(SystemVolume.Get());
+            island.SetMovementEnabled(movementEnabled);
+            island.SetClickThrough(clickThroughEnabled);
+            island.SetDockEdge(dockEdge);
+            island.SetDockPosition(dockPosition);
+            island.SetDockScreen(dockScreen);
+            island.DockEdgeChanged += delegate
+            {
+                dockEdge = island.DockEdgeName;
+                dockPosition = island.DockPosition;
+                dockScreen = island.DockScreenName;
+                SaveSettings();
+            };
             island.Show();
             island.DemonstrateStartup(muteBanners);
 
@@ -1281,7 +1779,8 @@ namespace SmartWindow
             }
             hotkeys = new GlobalHotkeys(
                 delegate { SetMusicMode(!musicMode); },
-                delegate { SetMusicPersistent(!musicPersistent); });
+                delegate { SetMusicPersistent(!musicPersistent); },
+                delegate { OpenNotificationManagement(true); });
 
             console = new ConsoleForm();
             console.PauseToggleRequested += delegate { TogglePause(); };
@@ -1296,6 +1795,30 @@ namespace SmartWindow
             console.TestNotificationRequested += delegate
             {
                 island.Demonstrate();
+            };
+            console.NotificationHistoryRequested += delegate
+            {
+                OpenNotificationManagement(true);
+            };
+            console.AppFiltersRequested += delegate
+            {
+                OpenNotificationManagement(false);
+            };
+            console.ExportSettingsRequested += delegate
+            {
+                ExportSettings();
+            };
+            console.ImportSettingsRequested += delegate
+            {
+                ImportSettings();
+            };
+            console.ResetSettingsRequested += delegate
+            {
+                ResetSettings();
+            };
+            console.SponsorRequested += delegate
+            {
+                OpenDonatePage();
             };
             console.SettingsRequested += delegate
             {
@@ -1343,6 +1866,32 @@ namespace SmartWindow
                     RefreshConsoleState();
                 }
             };
+            console.WindowMovementToggleRequested += delegate
+            {
+                bool enabled = !movementEnabled;
+                if (enabled && clickThroughEnabled)
+                {
+                    clickThroughEnabled = false;
+                    island.SetClickThrough(false);
+                }
+                movementEnabled = enabled;
+                island.SetMovementEnabled(movementEnabled);
+                SaveSettings();
+                RefreshConsoleState();
+            };
+            console.ClickThroughToggleRequested += delegate
+            {
+                bool enabled = !clickThroughEnabled;
+                if (enabled && movementEnabled)
+                {
+                    movementEnabled = false;
+                    island.SetMovementEnabled(false);
+                }
+                clickThroughEnabled = enabled;
+                island.SetClickThrough(clickThroughEnabled);
+                SaveSettings();
+                RefreshConsoleState();
+            };
             console.ConsoleOpacityChanged += delegate(
                 object sender,
                 double opacity)
@@ -1371,7 +1920,10 @@ namespace SmartWindow
                 RefreshConsoleState();
                 console.RefreshLocalization();
             };
-            RefreshConsoleState();
+            RefreshConsoleState(
+                safeMode
+                    ? Localization.Get("safeModeActive")
+                    : null);
             if (showConsole)
             {
                 console.ShowConsole();
@@ -1402,6 +1954,88 @@ namespace SmartWindow
                 }
             };
             bannerRefreshTimer.Start();
+
+            screenSignature = BuildScreenSignature();
+            healthTimer = new System.Windows.Forms.Timer();
+            healthTimer.Interval = 900;
+            healthTimer.Tick += delegate
+            {
+                CheckRuntimeHealth();
+            };
+            healthTimer.Start();
+        }
+
+        private void CheckRuntimeHealth()
+        {
+            string nextScreen = BuildScreenSignature();
+            if (!string.Equals(
+                nextScreen,
+                screenSignature,
+                StringComparison.Ordinal))
+            {
+                screenSignature = nextScreen;
+                island.ReapplyGeometry();
+            }
+
+            bool suppressed = fullscreenDetector.IsSuppressed();
+            if (suppressed != displaySuppressed)
+            {
+                displaySuppressed = suppressed;
+                if (suppressed)
+                {
+                    island.DismissNotificationForPolicy();
+                }
+                RefreshConsoleState(
+                    suppressed
+                        ? Localization.Get("fullscreenSuppressed")
+                        : null);
+            }
+
+            if (musicMode && !mediaMonitor.IsRunning)
+            {
+                mediaMonitor.Start();
+            }
+            volumeHealthCounter++;
+            if (musicMode && volumeHealthCounter % 5 == 0)
+            {
+                island.SetVolume(SystemVolume.Get());
+            }
+            if ((DateTime.UtcNow - startedAt).TotalSeconds >= 45.0)
+            {
+                CrashGuard.MarkHealthy();
+                safeMode = false;
+            }
+            island.EnsureAnimationClock();
+        }
+
+        private static string BuildScreenSignature()
+        {
+            Screen[] screens = Screen.AllScreens;
+            StringBuilder builder = new StringBuilder();
+            for (int index = 0; index < screens.Length; index++)
+            {
+                Rectangle bounds = screens[index].Bounds;
+                Rectangle working = screens[index].WorkingArea;
+                builder.Append(screens[index].DeviceName);
+                builder.Append(',');
+                builder.Append(bounds.Left);
+                builder.Append(',');
+                builder.Append(bounds.Top);
+                builder.Append(',');
+                builder.Append(bounds.Width);
+                builder.Append(',');
+                builder.Append(bounds.Height);
+                builder.Append(',');
+                builder.Append(working.Left);
+                builder.Append(',');
+                builder.Append(working.Top);
+                builder.Append(',');
+                builder.Append(working.Width);
+                builder.Append(',');
+                builder.Append(working.Height);
+                builder.Append(';');
+            }
+            return builder.ToString();
         }
 
         private void OnNotificationReceived(object sender, NotificationItem item)
@@ -1420,7 +2054,15 @@ namespace SmartWindow
                         new object[] { sender, item });
                     return;
                 }
-                if (!paused)
+                bool filtered = IsAppFiltered(item.AppName);
+                bool suppressedByDisplay = displaySuppressed;
+                AddNotificationHistory(
+                    item,
+                    filtered,
+                    suppressedByDisplay);
+                if (!paused &&
+                    !filtered &&
+                    !suppressedByDisplay)
                 {
                     island.Receive(item);
                 }
@@ -1459,6 +2101,12 @@ namespace SmartWindow
             paused = !paused;
             pauseItem.Text = Localization.Get(
                 paused ? "resumeReceive" : "pauseReceive");
+            historyItem.Text =
+                Localization.Get("notificationHistory");
+            filtersItem.Text =
+                Localization.Get("appFilters");
+            supportItem.Text =
+                Localization.Get("sponsorCoffeeButton");
             island.SetPaused(paused);
             RefreshConsoleState();
         }
@@ -1503,6 +2151,206 @@ namespace SmartWindow
             console.ShowConsole();
         }
 
+        private void OpenNotificationManagement(bool showHistory)
+        {
+            using (NotificationManagementForm form =
+                new NotificationManagementForm(
+                    notificationHistory,
+                    filteredApps,
+                    showHistory))
+            {
+                form.ShowDialog(console);
+                if (form.HistoryCleared)
+                {
+                    notificationHistory.Clear();
+                    SaveNotificationHistory();
+                }
+                if (form.ResultFilters != null)
+                {
+                    filteredApps.Clear();
+                    foreach (string appName in form.ResultFilters)
+                    {
+                        filteredApps.Add(appName);
+                    }
+                    SaveSettings();
+                }
+            }
+        }
+
+        private void OpenDonatePage()
+        {
+            if (!DonationIntegrityGuard.EnforceOrShutdown())
+            {
+                ExitThread();
+                return;
+            }
+            try
+            {
+                System.Diagnostics.Process.Start(
+                    DonationIntegrityGuard.Url);
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("OpenDonatePage: " + exception);
+            }
+        }
+
+        private void ExportSettings()
+        {
+            using (SaveFileDialog dialog = new SaveFileDialog())
+            {
+                dialog.Title = Localization.Get("exportSettings");
+                dialog.Filter = "INI (*.ini)|*.ini|All files (*.*)|*.*";
+                dialog.FileName = "SmartWindow-1.1.0-settings.ini";
+                if (dialog.ShowDialog(console) != DialogResult.OK)
+                {
+                    return;
+                }
+                try
+                {
+                    SaveSettings();
+                    File.Copy(settingsPath, dialog.FileName, true);
+                }
+                catch (Exception exception)
+                {
+                    Logger.Write("ExportSettings: " + exception);
+                    MessageBox.Show(
+                        exception.Message,
+                        Localization.Get("exportSettings"),
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void ImportSettings()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = Localization.Get("importSettings");
+                dialog.Filter = "INI (*.ini)|*.ini|All files (*.*)|*.*";
+                if (dialog.ShowDialog(console) != DialogResult.OK)
+                {
+                    return;
+                }
+                try
+                {
+                    string[] lines = File.ReadAllLines(
+                        dialog.FileName,
+                        Encoding.UTF8);
+                    File.WriteAllLines(
+                        settingsPath,
+                        lines,
+                        Encoding.UTF8);
+                    ApplySettingsFromDisk();
+                }
+                catch (Exception exception)
+                {
+                    Logger.Write("ImportSettings: " + exception);
+                    MessageBox.Show(
+                        exception.Message,
+                        Localization.Get("importSettings"),
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void ApplySettingsFromDisk()
+        {
+            Localization.SetLanguage(ReadLanguage());
+            musicMode = ReadMusicMode();
+            musicPersistent = ReadMusicPersistent();
+            transparentWindow = ReadTransparentWindow();
+            qualityEnhancement =
+                transparentWindow &&
+                ReadBooleanSetting("qualityEnhancement");
+            uiScale = ReadUiScale();
+            consoleOpacity = ReadConsoleOpacity();
+            movementEnabled = ReadBooleanSetting("windowMovement");
+            clickThroughEnabled = ReadBooleanSetting("clickThrough");
+            if (clickThroughEnabled)
+            {
+                movementEnabled = false;
+            }
+            dockEdge = ReadDockEdge();
+            dockPosition = ReadDockPosition();
+            dockScreen = ReadStringSetting("dockScreen");
+            LoadFilteredApps();
+            musicModeItem.Checked = musicMode;
+            musicPersistentItem.Checked = musicPersistent;
+            island.SetUiScale(uiScale);
+            island.SetGlassMode(transparentWindow);
+            island.SetQualityEnhancement(qualityEnhancement);
+            island.SetMovementEnabled(movementEnabled);
+            island.SetClickThrough(clickThroughEnabled);
+            island.SetDockEdge(dockEdge);
+            island.SetDockPosition(dockPosition);
+            island.SetDockScreen(dockScreen);
+            island.SetMusicMode(musicMode);
+            island.SetMusicPinned(musicPersistent);
+            if (musicMode)
+            {
+                mediaMonitor.Start();
+            }
+            else
+            {
+                mediaMonitor.Stop();
+            }
+            RefreshLocalizedText();
+            island.RefreshLanguage();
+            console.RefreshLocalization();
+            RefreshConsoleState();
+        }
+
+        private void ResetSettings()
+        {
+            if (MessageBox.Show(
+                Localization.Get("resetConfirm"),
+                Localization.Get("resetSettings"),
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning) != DialogResult.Yes)
+            {
+                return;
+            }
+
+            musicMode = false;
+            musicPersistent = false;
+            transparentWindow = false;
+            qualityEnhancement = false;
+            movementEnabled = false;
+            clickThroughEnabled = false;
+            dockEdge = "top";
+            dockPosition = 1;
+            dockScreen = "";
+            uiScale = 1.0;
+            consoleOpacity = 0.5;
+            filteredApps.Clear();
+            CrashGuard.MarkHealthy();
+            safeMode = false;
+            AutoStartManager.SetEnabled(false);
+            autoStart = false;
+            Localization.SetLanguage(UiLanguage.Chinese);
+            musicModeItem.Checked = false;
+            musicPersistentItem.Checked = false;
+            island.SetUiScale(uiScale);
+            island.SetGlassMode(false);
+            island.SetQualityEnhancement(false);
+            island.SetMovementEnabled(false);
+            island.SetClickThrough(false);
+            island.SetDockEdge(dockEdge);
+            island.SetDockPosition(dockPosition);
+            island.SetDockScreen(dockScreen);
+            island.SetMusicMode(false);
+            island.SetMusicPinned(false);
+            mediaMonitor.Stop();
+            SaveSettings();
+            RefreshLocalizedText();
+            island.RefreshLanguage();
+            console.RefreshLocalization();
+            RefreshConsoleState();
+        }
+
         private void RefreshConsoleState(string status = null)
         {
             if (console == null || console.IsDisposed)
@@ -1516,6 +2364,8 @@ namespace SmartWindow
                 transparentWindow,
                 qualityEnhancement,
                 autoStart,
+                movementEnabled,
+                clickThroughEnabled,
                 status ??
                     Localization.Get(
                         paused ? "statusPaused" : "statusRunning"),
@@ -1582,6 +2432,173 @@ namespace SmartWindow
             {
                 Logger.Write("OnMediaStateChanged: " + exception);
             }
+        }
+
+        private void AddNotificationHistory(
+            NotificationItem item,
+            bool filtered,
+            bool suppressed)
+        {
+            notificationHistory.Insert(
+                0,
+                new NotificationHistoryEntry
+                {
+                    ReceivedAt = item.ArrivedAt == DateTime.MinValue
+                        ? DateTime.Now
+                        : item.ArrivedAt,
+                    AppName = item.AppName ?? "",
+                    Title = item.Title ?? "",
+                    Body = item.Body ?? "",
+                    WasFiltered = filtered,
+                    WasSuppressed = suppressed
+                });
+            if (notificationHistory.Count > 100)
+            {
+                notificationHistory.RemoveRange(
+                    100,
+                    notificationHistory.Count - 100);
+            }
+            SaveNotificationHistory();
+        }
+
+        private bool IsAppFiltered(string appName)
+        {
+            return !string.IsNullOrWhiteSpace(appName) &&
+                filteredApps.Contains(appName.Trim());
+        }
+
+        private void SaveNotificationHistory()
+        {
+            try
+            {
+                Directory.CreateDirectory(
+                    Path.GetDirectoryName(historyPath));
+                StringBuilder builder = new StringBuilder();
+                for (int index = 0;
+                    index < notificationHistory.Count;
+                    index++)
+                {
+                    NotificationHistoryEntry item =
+                        notificationHistory[index];
+                    builder.Append(item.ReceivedAt.Ticks);
+                    builder.Append('\t');
+                    builder.Append(Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(item.AppName ?? "")));
+                    builder.Append('\t');
+                    builder.Append(Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(item.Title ?? "")));
+                    builder.Append('\t');
+                    builder.Append(Convert.ToBase64String(
+                        Encoding.UTF8.GetBytes(item.Body ?? "")));
+                    builder.Append('\t');
+                    builder.Append(item.WasFiltered ? '1' : '0');
+                    builder.Append('\t');
+                    builder.Append(item.WasSuppressed ? '1' : '0');
+                    builder.AppendLine();
+                }
+                File.WriteAllText(
+                    historyPath,
+                    builder.ToString(),
+                    Encoding.UTF8);
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("SaveNotificationHistory: " + exception);
+            }
+        }
+
+        private void LoadNotificationHistory()
+        {
+            try
+            {
+                if (!File.Exists(historyPath))
+                {
+                    return;
+                }
+                string[] lines = File.ReadAllLines(
+                    historyPath,
+                    Encoding.UTF8);
+                for (int index = 0;
+                    index < lines.Length &&
+                    notificationHistory.Count < 100;
+                    index++)
+                {
+                    string[] parts = lines[index].Split('\t');
+                    if (parts.Length < 6)
+                    {
+                        continue;
+                    }
+                    long ticks;
+                    if (!long.TryParse(parts[0], out ticks))
+                    {
+                        continue;
+                    }
+                    notificationHistory.Add(
+                        new NotificationHistoryEntry
+                        {
+                            ReceivedAt = new DateTime(ticks),
+                            AppName = DecodeHistoryText(parts[1]),
+                            Title = DecodeHistoryText(parts[2]),
+                            Body = DecodeHistoryText(parts[3]),
+                            WasFiltered = parts[4] == "1",
+                            WasSuppressed = parts[5] == "1"
+                        });
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("LoadNotificationHistory: " + exception);
+            }
+        }
+
+        private static string DecodeHistoryText(string value)
+        {
+            try
+            {
+                return Encoding.UTF8.GetString(
+                    Convert.FromBase64String(value));
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        private void LoadFilteredApps()
+        {
+            filteredApps.Clear();
+            string encoded = ReadStringSetting("filteredApps");
+            if (string.IsNullOrWhiteSpace(encoded))
+            {
+                return;
+            }
+            try
+            {
+                string[] values = Encoding.UTF8.GetString(
+                    Convert.FromBase64String(encoded))
+                    .Split('\n');
+                for (int index = 0; index < values.Length; index++)
+                {
+                    string value = values[index].Trim();
+                    if (value.Length > 0)
+                    {
+                        filteredApps.Add(value);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("LoadFilteredApps: " + exception);
+            }
+        }
+
+        private string EncodeFilteredApps()
+        {
+            return Convert.ToBase64String(
+                Encoding.UTF8.GetBytes(
+                    string.Join(
+                        "\n",
+                        new List<string>(filteredApps).ToArray())));
         }
 
         private bool ReadMusicMode()
@@ -1756,6 +2773,118 @@ namespace SmartWindow
             return false;
         }
 
+        private string ReadStringSetting(string key)
+        {
+            try
+            {
+                if (!File.Exists(settingsPath))
+                {
+                    return "";
+                }
+                string prefix = key + "=";
+                string[] lines = File.ReadAllLines(
+                    settingsPath,
+                    Encoding.UTF8);
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index].Trim();
+                    if (line.StartsWith(
+                        prefix,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        return line.Substring(prefix.Length);
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadStringSetting: " + exception);
+            }
+            return "";
+        }
+
+        private string ReadDockEdge()
+        {
+            try
+            {
+                if (!File.Exists(settingsPath))
+                {
+                    return "top";
+                }
+                string[] lines = File.ReadAllLines(
+                    settingsPath,
+                    Encoding.UTF8);
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index].Trim();
+                    if (!line.StartsWith(
+                        "dockEdge=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    string value = line.Substring("dockEdge=".Length);
+                    if (string.Equals(
+                            value,
+                            "bottom",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(
+                            value,
+                            "left",
+                            StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(
+                            value,
+                            "right",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return value.ToLowerInvariant();
+                    }
+                    return "top";
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadDockEdge: " + exception);
+            }
+            return "top";
+        }
+
+        private int ReadDockPosition()
+        {
+            try
+            {
+                if (!File.Exists(settingsPath))
+                {
+                    return 1;
+                }
+                string[] lines = File.ReadAllLines(
+                    settingsPath,
+                    Encoding.UTF8);
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index].Trim();
+                    if (!line.StartsWith(
+                        "dockPosition=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    int value;
+                    if (int.TryParse(
+                        line.Substring("dockPosition=".Length),
+                        out value))
+                    {
+                        return Math.Max(0, Math.Min(2, value));
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadDockPosition: " + exception);
+            }
+            return 1;
+        }
+
         private double ReadConsoleOpacity()
         {
             try
@@ -1822,6 +2951,24 @@ namespace SmartWindow
                     "qualityEnhancement=" +
                     (qualityEnhancement ? "1" : "0") +
                     Environment.NewLine +
+                    "windowMovement=" +
+                    (movementEnabled ? "1" : "0") +
+                    Environment.NewLine +
+                    "clickThrough=" +
+                    (clickThroughEnabled ? "1" : "0") +
+                    Environment.NewLine +
+                    "dockEdge=" +
+                    dockEdge +
+                    Environment.NewLine +
+                    "dockPosition=" +
+                    dockPosition +
+                    Environment.NewLine +
+                    "dockScreen=" +
+                    (dockScreen ?? "") +
+                    Environment.NewLine +
+                    "filteredApps=" +
+                    EncodeFilteredApps() +
+                    Environment.NewLine +
                     "consoleOpacity=" +
                     consoleOpacity.ToString(
                         "0.###",
@@ -1845,6 +2992,8 @@ namespace SmartWindow
             cleanedUp = true;
             bannerRefreshTimer.Stop();
             bannerRefreshTimer.Dispose();
+            healthTimer.Stop();
+            healthTimer.Dispose();
             settingsSaveTimer.Stop();
             settingsSaveTimer.Dispose();
             monitor.Dispose();

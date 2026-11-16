@@ -27,8 +27,8 @@ Run:
 
 The script creates:
 
-- `SmartWindow_1.0.1.0_x64.msix`
-- `SmartWindow_1.0.1.0_x64.msixupload`
+- `SmartWindow_1.1.0.0_x64.msix`
+- `SmartWindow_1.1.0.0_x64.msixupload`
 
 The `.msixupload` file is the file to select in Partner Center.
 
