@@ -1775,6 +1775,11 @@ namespace SmartWindow
                 SmartTimerMode mode)
             {
                 timerSession.Cancel(mode);
+                if (mode == SmartTimerMode.Countdown)
+                {
+                    StopTimerAlert();
+                    timerCompletionSoundPlayed = false;
+                }
                 PublishTimerState();
             };
             island.TimerLapRequested += delegate(
@@ -2001,6 +2006,7 @@ namespace SmartWindow
                     return;
                 }
                 timerCompletionSoundPlayed = false;
+                StopTimerAlert();
                 timerSession.SetAccentColor(timerAccentColor);
                 if (request.Mode == SmartTimerMode.Stopwatch)
                 {
@@ -2024,7 +2030,11 @@ namespace SmartWindow
                 SmartTimerMode mode)
             {
                 timerSession.Cancel(mode);
-                timerCompletionSoundPlayed = false;
+                if (mode == SmartTimerMode.Countdown)
+                {
+                    StopTimerAlert();
+                    timerCompletionSoundPlayed = false;
+                }
                 PublishTimerState();
             };
             console.TimerLapRequested += delegate(
@@ -2541,6 +2551,8 @@ namespace SmartWindow
             timerAccentColor = Color.FromArgb(100, 181, 246);
             timerSoundPath = "";
             timerSession.CancelAll();
+            StopTimerAlert();
+            timerCompletionSoundPlayed = false;
             timerSession.SetAccentColor(timerAccentColor);
             timerPresets.Clear();
             AddDefaultTimerPresets();
@@ -2668,13 +2680,32 @@ namespace SmartWindow
             {
                 return;
             }
-            if (timerSoundPlayer != null)
-            {
-                timerSoundPlayer.Dispose();
-            }
+            StopTimerAlert();
             timerSoundPlayer = new SoundPlayer(path);
             timerSoundPlayer.Load();
             timerSoundPlayer.Play();
+        }
+
+        private void StopTimerAlert()
+        {
+            SoundPlayer player = timerSoundPlayer;
+            timerSoundPlayer = null;
+            if (player == null)
+            {
+                return;
+            }
+            try
+            {
+                player.Stop();
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("StopTimerAlert: " + exception);
+            }
+            finally
+            {
+                player.Dispose();
+            }
         }
 
         private void RefreshLocalizedText()
@@ -3539,8 +3570,7 @@ namespace SmartWindow
             }
             if (timerSoundPlayer != null)
             {
-                timerSoundPlayer.Dispose();
-                timerSoundPlayer = null;
+                StopTimerAlert();
             }
             monitor.Dispose();
             mediaMonitor.Dispose();
