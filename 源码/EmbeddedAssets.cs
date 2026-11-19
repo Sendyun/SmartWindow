@@ -29,6 +29,19 @@ namespace SmartWindow
             get { return Path.Combine(scriptDirectory, "HYWenHei-85W.otf"); }
         }
 
+        public static string TimerAlertPath
+        {
+            get
+            {
+                string local = Path.Combine(
+                    AppDomain.CurrentDomain.BaseDirectory,
+                    "timer-alert.wav");
+                return File.Exists(local)
+                    ? local
+                    : Path.Combine(scriptDirectory, "timer-alert.wav");
+            }
+        }
+
         public static void Initialize()
         {
             if (initialized)
@@ -51,6 +64,9 @@ namespace SmartWindow
             ExtractResource(
                 "SmartWindow.Resources.HYWenHei-85W.otf",
                 UiFontPath);
+            ExtractResourceIfMissing(
+                "SmartWindow.Resources.timer-alert.wav",
+                Path.Combine(scriptDirectory, "timer-alert.wav"));
             try
             {
                 embeddedFonts = new PrivateFontCollection();
@@ -226,6 +242,39 @@ namespace SmartWindow
             finally
             {
                 resource.Position = 0;
+            }
+        }
+
+        private static void ExtractResourceIfMissing(
+            string resourceName,
+            string destination)
+        {
+            if (File.Exists(destination))
+            {
+                return;
+            }
+            Assembly assembly = Assembly.GetExecutingAssembly();
+            using (Stream resource =
+                assembly.GetManifestResourceStream(resourceName))
+            {
+                if (resource == null)
+                {
+                    throw new InvalidOperationException(
+                        "Embedded resource is missing: " + resourceName);
+                }
+                string directory = Path.GetDirectoryName(destination);
+                if (!string.IsNullOrEmpty(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+                using (FileStream output = new FileStream(
+                    destination,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None))
+                {
+                    resource.CopyTo(output);
+                }
             }
         }
     }

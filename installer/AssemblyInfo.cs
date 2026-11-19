@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyProduct("智慧窗")]
 [assembly: AssemblyCompany("Mr.Dove (Sendyun Technology Unit)")]
 [assembly: AssemblyCopyright("Copyright © 2026 Mr.Dove / Sendyun Technology Unit. All rights reserved.")]
-[assembly: AssemblyVersion("1.1.2.0")]
-[assembly: AssemblyFileVersion("1.1.2.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
 [assembly: ComVisible(false)]
 

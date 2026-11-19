@@ -22,11 +22,13 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "/resource:$outputRoot\donation-alipay.jpg,SmartWindow.Resources.donation-alipay.jpg" `
     "/resource:$outputRoot\donation-wechat.jpg,SmartWindow.Resources.donation-wechat.jpg" `
     "/resource:$outputRoot\HYWenHei-85W.otf,SmartWindow.Resources.HYWenHei-85W.otf" `
+    "/resource:$outputRoot\timer-alert.wav,SmartWindow.Resources.timer-alert.wav" `
     "/resource:$outputRoot\MediaMonitor.ps1,SmartWindow.Resources.MediaMonitor.ps1" `
     "/resource:$outputRoot\MediaCommand.ps1,SmartWindow.Resources.MediaCommand.ps1" `
     /r:System.dll `
     /r:System.Core.dll `
     /r:System.Drawing.dll `
+    /r:System.Management.dll `
     /r:System.Windows.Forms.dll `
     /r:System.Xml.dll `
     "$sourceRoot\SmartWindow.cs" `
@@ -34,6 +36,9 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "$sourceRoot\MediaMonitor.cs" `
     "$sourceRoot\GlobalHotkeys.cs" `
     "$sourceRoot\GlobalMouseHook.cs" `
+    "$sourceRoot\TimerEngine.cs" `
+    "$sourceRoot\TimerDialogs.cs" `
+    "$sourceRoot\PerformanceMetrics.cs" `
     "$sourceRoot\ConsoleForm.cs" `
     "$sourceRoot\ManagementForms.cs" `
     "$sourceRoot\EmbeddedAssets.cs" `

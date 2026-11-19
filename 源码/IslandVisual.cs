@@ -33,6 +33,10 @@ namespace SmartWindow
         private const int SideMusicWidth = 300;
         private const int SideMusicHeight = 190;
         private const int SideMusicExpandedHeight = 356;
+        private const int TimerWidth = 330;
+        private const int TimerHeight = 74;
+        private const int TimerExpandedHeight = 184;
+        private const int TimerMultiWidth = 700;
 
         private enum DockEdge
         {
@@ -49,6 +53,7 @@ namespace SmartWindow
             Compact,
             Detail,
             Music,
+            Timer,
             Collapsing
         }
 
@@ -58,11 +63,16 @@ namespace SmartWindow
         private readonly System.Threading.Timer controlsTimer;
         private readonly object sequenceSync = new object();
         private readonly GlobalMouseHook mouseHook;
+        private readonly WinEventDelegate desktopChangeCallback;
+        private IntPtr desktopChangeHook;
+        private readonly IslandPerformanceMonitor performanceMonitor =
+            new IslandPerformanceMonitor();
         private readonly DockPreviewForm dockPreview;
         private Font microFont;
         private Font titleFont;
         private Font bodyFont;
         private Font tinyFont;
+        private Font timerTimeFont;
         private readonly ManualResetEvent frameStopEvent =
             new ManualResetEvent(false);
 
@@ -72,6 +82,9 @@ namespace SmartWindow
         public event EventHandler SoundSettingsRequested;
         public event EventHandler MediaSourceOpenRequested;
         public event EventHandler MusicWindowCloseRequested;
+        public event EventHandler<SmartTimerMode> TimerPauseToggleRequested;
+        public event EventHandler<SmartTimerMode> TimerCancelRequested;
+        public event EventHandler<SmartTimerMode> TimerLapRequested;
         public event EventHandler DockEdgeChanged;
 
         private NotificationItem current;
@@ -110,6 +123,27 @@ namespace SmartWindow
         private double qualityBlend;
         private double qualityBlendVelocity;
         private double qualityBlendTarget;
+        private bool frostedGlassEnabled;
+        private double frostedIntensity = 0.55;
+        private double frostedBlend;
+        private double frostedBlendVelocity;
+        private double frostedBlendTarget;
+        private Bitmap frostedNoiseTile;
+        private TextureBrush frostedNoiseBrush;
+        private Bitmap frostedBackdrop;
+        private readonly object frostedBackdropSync = new object();
+        private Rectangle frostedBackdropSourceBounds;
+        private int frostedBackdropVersion;
+        private Bitmap frostedShellCache;
+        private int frostedShellWidth;
+        private int frostedShellHeight;
+        private int frostedShellRadius;
+        private int frostedShellVersion;
+        private double frostedShellPresence;
+        private DateTime nextFrostedBackdropCapture = DateTime.MinValue;
+        private DateTime lastFrostedBackdropCapture = DateTime.MinValue;
+        private int frostedBackdropCapturePending;
+        private volatile bool frostedBackdropDirty = true;
         private double qualityParticleSeconds;
         private double collapseDissolveProgress;
         private DateTime notificationCollapseAt = DateTime.MaxValue;
@@ -136,6 +170,10 @@ namespace SmartWindow
         private bool musicPaused;
         private bool musicPauseEndPending;
         private bool musicControlsVisible;
+        private bool currentIsTimer;
+        private bool timerExpanded;
+        private double timerAnimationSeconds;
+        private TimerSnapshot timerSnapshot;
         private bool draggingVolume;
         private int hoveredMusicButton = -1;
         private MediaPlaybackState mediaState;
@@ -160,8 +198,10 @@ namespace SmartWindow
         private const uint FrameMessage =
             0x8000 + 0x173;
         private const int ActiveFrameRate = 165;
+        private const int WaveformFrameRate = 30;
         private const int IdleFrameRate = 30;
         private int requestedFrameRate = ActiveFrameRate;
+        private int frameRateLimit = 120;
 
         public IslandForm()
         {
@@ -200,6 +240,16 @@ namespace SmartWindow
                 Timeout.Infinite);
             mouseHook = new GlobalMouseHook(OnGlobalMouseDown);
             dockPreview = new DockPreviewForm();
+            desktopChangeCallback = new WinEventDelegate(
+                OnDesktopWindowChanged);
+            desktopChangeHook = SetWinEventHook(
+                0x8002,
+                0x800B,
+                IntPtr.Zero,
+                desktopChangeCallback,
+                0,
+                0,
+                0x0002);
 
             MouseEnter += delegate
             {
@@ -362,6 +412,98 @@ namespace SmartWindow
             }
         }
 
+        public void UpdateTimer(TimerSnapshot snapshot)
+        {
+            if (IsDisposed)
+            {
+                return;
+            }
+
+            timerSnapshot = snapshot;
+            if (snapshot != null && snapshot.IsActive)
+            {
+                if (!currentIsTimer)
+                {
+                    StartTimerVisual();
+                }
+                else
+                {
+                    RequestRender();
+                }
+                return;
+            }
+
+            if (currentIsTimer && phase != VisualPhase.Collapsing)
+            {
+                StopControlsTimeout();
+                CollapseNow();
+            }
+        }
+
+        private void StartTimerVisual()
+        {
+            CancelQueuedAction();
+            StopControlsTimeout();
+            if (current != null &&
+                !currentIsMedia &&
+                !currentIsTimer)
+            {
+                queue.Enqueue(current);
+            }
+            current = new NotificationItem();
+            current.AppName = Localization.Get("appName");
+            current.Title = Localization.Get("timer");
+            current.Body = "";
+            if (mediaState != null)
+            {
+                current.ArtworkPath = mediaState.ArtworkPath;
+                current.MediaSignature = mediaState.Signature;
+            }
+            currentIsMedia = false;
+            currentIsTimer = true;
+            musicEnding = false;
+            timerExpanded = false;
+            phase = VisualPhase.Seed;
+            Opacity = 1.0;
+            animatedWidth = Scale(SeedSize);
+            animatedHeight = Scale(SeedSize);
+            currentWidth = (int)Math.Round(animatedWidth);
+            currentHeight = (int)Math.Round(animatedHeight);
+            widthVelocity = 0.0;
+            heightVelocity = 0.0;
+            detailBlend = 0.0;
+            detailBlendVelocity = 0.0;
+            detailBlendTarget = 0.0;
+            springTargetWidth = currentWidth;
+            springTargetHeight = currentHeight;
+            if (!Visible)
+            {
+                Show();
+            }
+            ApplyGeometry();
+            StartFrameClock();
+            QueueAction(StartTimerExpanded, 110);
+        }
+
+        private void StartTimerExpanded()
+        {
+            if (!currentIsTimer || timerSnapshot == null)
+            {
+                return;
+            }
+            phase = VisualPhase.Timer;
+            SetSpringTarget(
+                timerExpanded && HasMusicCompanion()
+                    ? TimerMultiWindowWidth
+                    : TimerWindowWidth,
+                timerExpanded && HasMusicCompanion()
+                    ? TimerMultiWindowHeight
+                    : (timerExpanded
+                        ? TimerExpandedWindowHeight
+                        : TimerCompactWindowHeight),
+                0.0);
+        }
+
         public void SetUiScale(double scale)
         {
             userScale = Math.Max(0.80, Math.Min(1.20, scale));
@@ -415,12 +557,16 @@ namespace SmartWindow
             glassBlendTarget = enabled ? 1.0 : 0.0;
             qualityBlendTarget =
                 enabled && qualityEnhancementEnabled ? 1.0 : 0.0;
+            frostedBlendTarget =
+                enabled && frostedGlassEnabled ? 1.0 : 0.0;
             if (current == null || phase == VisualPhase.Hidden)
             {
                 glassBlend = glassBlendTarget;
                 glassBlendVelocity = 0.0;
                 qualityBlend = qualityBlendTarget;
                 qualityBlendVelocity = 0.0;
+                frostedBlend = frostedBlendTarget;
+                frostedBlendVelocity = 0.0;
                 RequestRender();
                 return;
             }
@@ -444,10 +590,239 @@ namespace SmartWindow
             RequestRender();
         }
 
+        public void SetFrostedGlass(bool enabled, double intensity)
+        {
+            frostedGlassEnabled = enabled;
+            frostedIntensity = Clamp01(intensity);
+            frostedBlendTarget =
+                enabled && glassModeEnabled ? 1.0 : 0.0;
+            RebuildFrostedNoiseTile();
+            nextFrostedBackdropCapture = DateTime.MinValue;
+            if (current == null || phase == VisualPhase.Hidden)
+            {
+                frostedBlend = frostedBlendTarget;
+                frostedBlendVelocity = 0.0;
+                RequestRender();
+                return;
+            }
+            StartFrameClock();
+            RequestRender();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            nextFrostedBackdropCapture = DateTime.MinValue;
+        }
+
+        private void RefreshFrostedBackdrop()
+        {
+            if (!IsHandleCreated ||
+                IsDisposed ||
+                frostedBlend < 0.01 ||
+                !glassModeEnabled ||
+                !frostedGlassEnabled)
+            {
+                return;
+            }
+
+            DateTime now = DateTime.UtcNow;
+            bool geometryMoving =
+                draggingWindow ||
+                snappingToDock ||
+                phase == VisualPhase.Collapsing ||
+                Math.Abs(widthVelocity) > 0.05 ||
+                Math.Abs(heightVelocity) > 0.05 ||
+                Math.Abs(animatedWidth - springTargetWidth) > 0.25 ||
+                Math.Abs(animatedHeight - springTargetHeight) > 0.25;
+            if (geometryMoving)
+            {
+                frostedBackdropDirty = true;
+                nextFrostedBackdropCapture = now.AddMilliseconds(40);
+                return;
+            }
+            if (frostedBackdropDirty)
+            {
+                frostedBackdropDirty = false;
+                nextFrostedBackdropCapture = DateTime.MinValue;
+            }
+            if (lastFrostedBackdropCapture != DateTime.MinValue &&
+                now - lastFrostedBackdropCapture < TimeSpan.FromMilliseconds(280))
+            {
+                nextFrostedBackdropCapture =
+                    lastFrostedBackdropCapture.AddMilliseconds(280);
+                return;
+            }
+            if (now < nextFrostedBackdropCapture)
+            {
+                return;
+            }
+            nextFrostedBackdropCapture = now.AddSeconds(5);
+            lastFrostedBackdropCapture = now;
+
+            Rectangle captureBounds = Bounds;
+            if (captureBounds.Width < Scale(24) ||
+                captureBounds.Height < Scale(12))
+            {
+                return;
+            }
+
+            QueueFrostedBackdropCapture(captureBounds);
+        }
+
+        private void QueueFrostedBackdropCapture(Rectangle captureBounds)
+        {
+            if (!IsHandleCreated ||
+                IsDisposed ||
+                captureBounds.Width < Scale(24) ||
+                captureBounds.Height < Scale(12) ||
+                Interlocked.CompareExchange(
+                    ref frostedBackdropCapturePending,
+                    1,
+                    0) != 0)
+            {
+                return;
+            }
+
+            IntPtr windowHandle = Handle;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    CaptureFrostedBackdrop(windowHandle, captureBounds);
+                }
+                finally
+                {
+                    Interlocked.Exchange(
+                        ref frostedBackdropCapturePending,
+                        0);
+                }
+            });
+        }
+
+        private void CaptureFrostedBackdrop(
+            IntPtr windowHandle,
+            Rectangle captureBounds)
+        {
+            bool captureExcluded = false;
+            try
+            {
+                if (!SetWindowDisplayAffinity(
+                    windowHandle,
+                    0x00000011))
+                {
+                    return;
+                }
+                captureExcluded = true;
+
+                Bitmap captured = new Bitmap(
+                    captureBounds.Width,
+                    captureBounds.Height,
+                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                try
+                {
+                    using (Graphics captureGraphics =
+                        Graphics.FromImage(captured))
+                    {
+                        captureGraphics.CopyFromScreen(
+                            captureBounds.Left,
+                            captureBounds.Top,
+                            0,
+                            0,
+                            captureBounds.Size,
+                            CopyPixelOperation.SourceCopy);
+                    }
+
+                    int sampleWidth = Math.Max(
+                        2,
+                        (int)Math.Round(captureBounds.Width / 14.0));
+                    int sampleHeight = Math.Max(
+                        2,
+                        (int)Math.Round(captureBounds.Height / 14.0));
+                    using (Bitmap sampled = new Bitmap(
+                        sampleWidth,
+                        sampleHeight,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    using (Graphics sampleGraphics =
+                        Graphics.FromImage(sampled))
+                    {
+                        sampleGraphics.InterpolationMode =
+                            InterpolationMode.HighQualityBilinear;
+                        sampleGraphics.PixelOffsetMode =
+                            PixelOffsetMode.HighQuality;
+                        sampleGraphics.DrawImage(
+                            captured,
+                            new Rectangle(
+                                0,
+                                0,
+                                sampleWidth,
+                                sampleHeight));
+
+                        Bitmap blurred = new Bitmap(
+                            captureBounds.Width,
+                            captureBounds.Height,
+                            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                        using (Graphics blurGraphics =
+                            Graphics.FromImage(blurred))
+                        {
+                            blurGraphics.InterpolationMode =
+                                InterpolationMode.HighQualityBicubic;
+                            blurGraphics.PixelOffsetMode =
+                                PixelOffsetMode.HighQuality;
+                            blurGraphics.DrawImage(
+                                sampled,
+                                new Rectangle(
+                                    0,
+                                    0,
+                                    blurred.Width,
+                                    blurred.Height));
+                        }
+                        lock (frostedBackdropSync)
+                        {
+                            Bitmap previous = frostedBackdrop;
+                            frostedBackdrop = blurred;
+                            frostedBackdropSourceBounds = captureBounds;
+                            frostedBackdropVersion++;
+                            if (previous != null)
+                            {
+                                previous.Dispose();
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    captured.Dispose();
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("RefreshFrostedBackdrop: " + exception);
+            }
+            finally
+            {
+                if (captureExcluded)
+                {
+                    SetWindowDisplayAffinity(windowHandle, 0);
+                }
+            }
+        }
+
         public void SetVolume(double value)
         {
             volumeLevel = Math.Max(0.0, Math.Min(1.0, value));
             RequestRender();
+        }
+
+        public void SetFrameRateLimit(int value)
+        {
+            frameRateLimit = Math.Max(60, Math.Min(165, value));
+            UpdateRequestedFrameRate();
+        }
+
+        public PerformanceSnapshot GetPerformanceSnapshot()
+        {
+            return performanceMonitor.GetSnapshot();
         }
 
         public void SetMovementEnabled(bool enabled)
@@ -602,6 +977,31 @@ namespace SmartWindow
             }
         }
 
+        private int TimerWindowWidth
+        {
+            get { return Scale(SideDocked ? 260 : TimerWidth); }
+        }
+
+        private int TimerCompactWindowHeight
+        {
+            get { return Scale(SideDocked ? 178 : TimerHeight); }
+        }
+
+        private int TimerExpandedWindowHeight
+        {
+            get { return Scale(SideDocked ? 320 : TimerExpandedHeight); }
+        }
+
+        private int TimerMultiWindowWidth
+        {
+            get { return Scale(SideDocked ? 260 : TimerMultiWidth); }
+        }
+
+        private int TimerMultiWindowHeight
+        {
+            get { return Scale(SideDocked ? 376 : TimerExpandedHeight); }
+        }
+
         private int NotificationTargetWidth(bool compact)
         {
             if (SideDocked)
@@ -687,6 +1087,30 @@ namespace SmartWindow
                 {
                     waveformSeconds = 0.0;
                 }
+            }
+            if (currentIsTimer && timerSnapshot != null)
+            {
+                musicPaused =
+                    state == null ||
+                    !state.IsPlaying;
+                if (state != null)
+                {
+                    current.ArtworkPath = state.ArtworkPath;
+                    current.MediaSignature = state.Signature;
+                }
+                SetSpringTarget(
+                    Scale(timerExpanded && HasMusicCompanion()
+                        ? TimerMultiWindowWidth
+                        : TimerWindowWidth),
+                    timerExpanded && HasMusicCompanion()
+                        ? TimerMultiWindowHeight
+                        : (timerExpanded
+                            ? TimerExpandedWindowHeight
+                            : TimerCompactWindowHeight),
+                    0.0);
+                StartFrameClock();
+                RequestRender();
+                return;
             }
             if (state == null || !state.IsPlaying)
             {
@@ -807,6 +1231,7 @@ namespace SmartWindow
             detailBlendTarget = 0.0;
             springTargetWidth = currentWidth;
             springTargetHeight = currentHeight;
+            PrefetchFrostedBackdropForTarget();
             if (!Visible)
             {
                 Show();
@@ -884,6 +1309,7 @@ namespace SmartWindow
             detailBlendTarget = 0.0;
             springTargetWidth = currentWidth;
             springTargetHeight = currentHeight;
+            PrefetchFrostedBackdropForTarget();
             if (!Visible)
             {
                 Show();
@@ -1032,6 +1458,8 @@ namespace SmartWindow
         {
             current = null;
             currentIsMedia = false;
+            currentIsTimer = false;
+            timerExpanded = false;
             CancelNotificationCollapse();
             musicEnding = false;
             musicPaused = false;
@@ -1063,7 +1491,16 @@ namespace SmartWindow
             {
                 return;
             }
-            if (currentIsMedia)
+            if (currentIsTimer)
+            {
+                phase = VisualPhase.Timer;
+                timerExpanded = false;
+                SetSpringTarget(
+                    TimerWindowWidth,
+                    TimerCompactWindowHeight,
+                    0.0);
+            }
+            else if (currentIsMedia)
             {
                 musicDismissed = true;
                 musicEnding = true;
@@ -1162,7 +1599,9 @@ namespace SmartWindow
             frameStopEvent.Reset();
             lastFrameTimestamp = Stopwatch.GetTimestamp();
             Interlocked.Exchange(ref frameMessagePending, 0);
-            Volatile.Write(ref requestedFrameRate, ActiveFrameRate);
+            Volatile.Write(
+                ref requestedFrameRate,
+                Math.Min(ActiveFrameRate, frameRateLimit));
             frameClockRunning = true;
             frameThread = new Thread(FrameLoop);
             frameThread.IsBackground = true;
@@ -1288,6 +1727,60 @@ namespace SmartWindow
                     0,
                     Math.Max(1, currentWidth),
                     Math.Max(1, currentHeight));
+                if (IsMultiWindowExpanded)
+                {
+                    int gap = Scale(16);
+                    Rectangle leftPanel;
+                    Rectangle rightPanel;
+                    if (SideDocked)
+                    {
+                        int panelHeight = Math.Max(
+                            1,
+                            (bounds.Height - gap) / 2);
+                        leftPanel = new Rectangle(
+                            0,
+                            0,
+                            bounds.Width,
+                            panelHeight);
+                        rightPanel = new Rectangle(
+                            0,
+                            panelHeight + gap,
+                            bounds.Width,
+                            Math.Max(
+                                1,
+                                bounds.Height - panelHeight - gap));
+                    }
+                    else
+                    {
+                        int panelWidth = Math.Max(
+                            1,
+                            (bounds.Width - gap) / 2);
+                        leftPanel = new Rectangle(
+                            0,
+                            0,
+                            panelWidth,
+                            bounds.Height);
+                        rightPanel = new Rectangle(
+                            panelWidth + gap,
+                            0,
+                            Math.Max(1, bounds.Width - panelWidth - gap),
+                            bounds.Height);
+                    }
+                    using (GraphicsPath leftPath = RoundedRectangle(
+                        leftPanel,
+                        Scale(24)))
+                    using (GraphicsPath rightPath = RoundedRectangle(
+                        rightPanel,
+                        Scale(24)))
+                    {
+                        message.Result =
+                            leftPath.IsVisible(client) ||
+                            rightPath.IsVisible(client)
+                                ? new IntPtr(1)
+                                : new IntPtr(-1);
+                        return;
+                    }
+                }
                 using (GraphicsPath path = RoundedRectangle(
                     bounds,
                     CalculateCornerRadius()))
@@ -1361,6 +1854,13 @@ namespace SmartWindow
                     240.0,
                     27.0);
                 StepSpring(
+                    ref frostedBlend,
+                    ref frostedBlendVelocity,
+                    frostedBlendTarget,
+                    step,
+                    520.0,
+                    36.0);
+                StepSpring(
                     ref dockSnapBlend,
                     ref dockSnapVelocity,
                     1.0,
@@ -1372,6 +1872,7 @@ namespace SmartWindow
             waveformMotion = Clamp01(waveformMotion);
             glassBlend = Clamp01(glassBlend);
             qualityBlend = Clamp01(qualityBlend);
+            frostedBlend = Clamp01(frostedBlend);
             dockSnapBlend = Clamp01(dockSnapBlend);
             if (snappingToDock && dockSnapBlend >= 0.999)
             {
@@ -1391,12 +1892,19 @@ namespace SmartWindow
                     collapseDissolveProgress +
                     elapsed / 0.78);
             }
-            if (currentIsMedia &&
-                current != null &&
-                !musicPaused &&
-                !musicEnding)
+            if ((currentIsMedia &&
+                 current != null &&
+                 !musicPaused &&
+                 !musicEnding) ||
+                (currentIsTimer &&
+                 HasMusicCompanion() &&
+                 !musicPaused))
             {
                 waveformSeconds += elapsed;
+            }
+            if (currentIsTimer)
+            {
+                timerAnimationSeconds += elapsed;
             }
             if (current != null &&
                 !currentIsMedia &&
@@ -1418,9 +1926,11 @@ namespace SmartWindow
             if (geometryChanged || draggingWindow || snappingToDock)
             {
                 ApplyGeometry();
+                RefreshFrostedBackdrop();
             }
             else
             {
+                RefreshFrostedBackdrop();
                 RequestRender();
             }
             UpdateRequestedFrameRate();
@@ -1428,7 +1938,7 @@ namespace SmartWindow
 
         private void UpdateRequestedFrameRate()
         {
-            bool active =
+            bool transitionActive =
                 draggingWindow ||
                 snappingToDock ||
                 phase == VisualPhase.Collapsing ||
@@ -1438,18 +1948,32 @@ namespace SmartWindow
                 Math.Abs(waveformMotionVelocity) > 0.01 ||
                 Math.Abs(glassBlendVelocity) > 0.01 ||
                 Math.Abs(qualityBlendVelocity) > 0.01 ||
+                Math.Abs(frostedBlendVelocity) > 0.01 ||
                 Math.Abs(animatedWidth - springTargetWidth) > 0.35 ||
                 Math.Abs(animatedHeight - springTargetHeight) > 0.35 ||
-                (currentIsMedia &&
-                 current != null &&
-                 phase == VisualPhase.Music &&
-                 !musicPaused &&
-                 !musicEnding) ||
                 Math.Abs(qualityBlend - qualityBlendTarget) > 0.01 ||
-                Math.Abs(glassBlend - glassBlendTarget) > 0.01;
+                Math.Abs(glassBlend - glassBlendTarget) > 0.01 ||
+                Math.Abs(frostedBlend - frostedBlendTarget) > 0.01;
+            bool timerActive =
+                currentIsTimer &&
+                timerSnapshot != null &&
+                timerSnapshot.IsActive;
+            bool waveformActive =
+                currentIsMedia &&
+                current != null &&
+                phase == VisualPhase.Music &&
+                !musicPaused &&
+                !musicEnding;
+            int frameRate = Math.Min(
+                frameRateLimit,
+                transitionActive
+                    ? ActiveFrameRate
+                    : (waveformActive || timerActive
+                        ? WaveformFrameRate
+                        : IdleFrameRate));
             Volatile.Write(
                 ref requestedFrameRate,
-                active ? ActiveFrameRate : IdleFrameRate);
+                frameRate);
         }
 
         private void OnGlobalMouseDown(int screenX, int screenY)
@@ -1469,14 +1993,44 @@ namespace SmartWindow
                 !currentIsMedia ||
                 phase != VisualPhase.Music)
             {
-                return;
+                if (!timerExpanded || !currentIsTimer)
+                {
+                    return;
+                }
             }
 
             Point localPoint = PointToClient(new Point(screenX, screenY));
             if (!ClientRectangle.Contains(localPoint))
             {
-                CollapseMusicControls();
+                if (timerExpanded && currentIsTimer)
+                {
+                    CollapseTimerControls();
+                }
+                if (musicControlsVisible && currentIsMedia)
+                {
+                    CollapseMusicControls();
+                }
             }
+        }
+
+        private void OnDesktopWindowChanged(
+            IntPtr hook,
+            uint eventType,
+            IntPtr window,
+            int objectId,
+            int childId,
+            uint threadId,
+            uint eventTime)
+        {
+            if (window == IntPtr.Zero)
+            {
+                return;
+            }
+            if (objectId != 0 || childId != 0)
+            {
+                return;
+            }
+            frostedBackdropDirty = true;
         }
 
         private static void StepSpring(
@@ -1649,6 +2203,26 @@ namespace SmartWindow
 
         private int CalculateCornerRadius()
         {
+            if (currentIsTimer && phase != VisualPhase.Seed)
+            {
+                int compactHeight = Math.Max(
+                    1,
+                    Scale(TimerHeight));
+                int expandedHeight = Math.Max(
+                    compactHeight + 1,
+                    Scale(TimerExpandedHeight));
+                double expansion = Clamp01(
+                    (currentHeight - compactHeight) /
+                    (double)(expandedHeight - compactHeight));
+                double compactRadius = compactHeight / 2.0;
+                double expandedRadius = Scale(27);
+                return Math.Max(
+                    1,
+                    (int)Math.Round(
+                        compactRadius +
+                        (expandedRadius - compactRadius) *
+                        SmoothStep(expansion)));
+            }
             if (SideDocked && phase != VisualPhase.Seed)
             {
                 return Math.Max(1, Scale(24));
@@ -1697,6 +2271,7 @@ namespace SmartWindow
 
             int width = Math.Max(1, currentWidth);
             int height = Math.Max(1, currentHeight);
+            long frameStart = Stopwatch.GetTimestamp();
             renderingLayered = true;
             try
             {
@@ -1737,6 +2312,10 @@ namespace SmartWindow
                     0,
                     ref blend,
                     2);
+                performanceMonitor.RecordFrame(
+                    frameStart,
+                    Stopwatch.GetTimestamp(),
+                    Volatile.Read(ref requestedFrameRate));
             }
             catch (Exception exception)
             {
@@ -1794,11 +2373,11 @@ namespace SmartWindow
                 layeredGraphics.SmoothingMode =
                     SmoothingMode.AntiAlias;
                 layeredGraphics.InterpolationMode =
-                    InterpolationMode.HighQualityBicubic;
+                    InterpolationMode.HighQualityBilinear;
                 layeredGraphics.PixelOffsetMode =
-                    PixelOffsetMode.HighQuality;
+                    PixelOffsetMode.HighSpeed;
                 layeredGraphics.CompositingQuality =
-                    CompositingQuality.HighQuality;
+                    CompositingQuality.HighSpeed;
                 layeredGraphics.TextRenderingHint =
                     System.Drawing.Text.TextRenderingHint
                         .AntiAliasGridFit;
@@ -1894,50 +2473,80 @@ namespace SmartWindow
         private void PaintSurface(Graphics graphics)
         {
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            graphics.CompositingQuality = CompositingQuality.HighQuality;
+            graphics.InterpolationMode = InterpolationMode.HighQualityBilinear;
+            graphics.PixelOffsetMode = PixelOffsetMode.HighSpeed;
+            graphics.CompositingQuality = CompositingQuality.HighSpeed;
             graphics.TextRenderingHint =
                 System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+
+            if (currentIsTimer && draggingWindow)
+            {
+                graphics.Clear(Color.Transparent);
+                DrawSeed(graphics);
+                return;
+            }
+
+            if (IsMultiWindowExpanded)
+            {
+                PaintMultiWindow(graphics);
+                return;
+            }
 
             Rectangle outer = new Rectangle(
                 0,
                 0,
                 Math.Max(1, ClientSize.Width - 1),
                 Math.Max(1, ClientSize.Height - 1));
-            int radius = CalculateCornerRadius();
-            using (GraphicsPath path = RoundedRectangle(outer, radius))
+            bool timerCompanion =
+                currentIsTimer &&
+                !timerExpanded &&
+                HasMusicCompanion();
+            Rectangle shell = outer;
+            if (timerCompanion)
             {
-                Color solidTop = Color.FromArgb(255, 26, 26, 29);
-                Color solidBottom = Color.FromArgb(255, 9, 9, 11);
-                Color glassTop = Color.FromArgb(178, 45, 52, 64);
-                Color glassBottom = Color.FromArgb(126, 14, 18, 25);
-                using (LinearGradientBrush background =
-                    new LinearGradientBrush(
-                        new Rectangle(
-                            outer.Left,
-                            outer.Top,
-                            Math.Max(1, outer.Width),
-                            Math.Max(2, outer.Height)),
-                        BlendColor(solidTop, glassTop, glassBlend),
-                        BlendColor(solidBottom, glassBottom, glassBlend),
-                        LinearGradientMode.Vertical))
+                int inset = Scale(24);
+                shell = new Rectangle(
+                    inset,
+                    0,
+                    Math.Max(1, outer.Width - inset * 2),
+                    outer.Height);
+            }
+            int radius = CalculateCornerRadius();
+            using (GraphicsPath path = RoundedRectangle(shell, radius))
+            {
+                double frostPresence = Clamp01(
+                    frostedBlend * frostedIntensity);
+                bool shellCached =
+                    !timerCompanion &&
+                    frostPresence > 0.02 &&
+                    (CanUseFrostedShellCache() ||
+                     frostedShellCache != null);
+                if (shellCached &&
+                    TryDrawFrostedShellCache(
+                        graphics,
+                        path,
+                        frostPresence))
                 {
-                    graphics.FillPath(background, path);
+                    // Static frosted glass is reused every frame.
                 }
-
-                using (Pen border = new Pen(
-                    Color.FromArgb(
-                        (int)Math.Round(94 + 50 * glassBlend),
-                        185,
-                        190,
-                        184),
-                    1f))
+                else
                 {
-                    graphics.DrawPath(border, path);
+                    PaintShellBase(
+                        graphics,
+                        path,
+                        shell,
+                        radius,
+                        frostPresence);
                 }
-                DrawGlassSheen(graphics, path, outer);
-                DrawQualityGlass(graphics, path, outer, radius);
+                DrawShellBorder(
+                    graphics,
+                    path,
+                    frostPresence);
+                if (frostPresence < 0.02)
+                {
+                    DrawGlassSheen(graphics, path, outer);
+                }
+                DrawQualityGlass(graphics, path, shell, radius);
             }
 
             if (current == null || phase == VisualPhase.Hidden)
@@ -1963,6 +2572,10 @@ namespace SmartWindow
                     DrawMusic(graphics);
                 }
             }
+            else if (phase == VisualPhase.Timer)
+            {
+                DrawTimer(graphics);
+            }
             else if (phase == VisualPhase.Collapsing)
             {
                 DrawCollapsing(graphics);
@@ -1977,6 +2590,268 @@ namespace SmartWindow
                 {
                     DrawExpanded(graphics);
                 }
+            }
+        }
+
+        private bool IsMultiWindowExpanded
+        {
+            get
+            {
+                return currentIsTimer &&
+                    timerExpanded &&
+                    HasMusicCompanion();
+            }
+        }
+
+        private void PaintMultiWindow(Graphics graphics)
+        {
+            if (timerSnapshot == null)
+            {
+                return;
+            }
+            Rectangle outer = new Rectangle(
+                0,
+                0,
+                Math.Max(1, ClientSize.Width - 1),
+                Math.Max(1, ClientSize.Height - 1));
+            int gap = Scale(16);
+            Rectangle timerPanel;
+            Rectangle musicPanel;
+            if (SideDocked)
+            {
+                int panelHeight = Math.Max(
+                    1,
+                    (outer.Height - gap) / 2);
+                timerPanel = new Rectangle(
+                    0,
+                    0,
+                    outer.Width,
+                    panelHeight);
+                musicPanel = new Rectangle(
+                    0,
+                    panelHeight + gap,
+                    outer.Width,
+                    Math.Max(1, outer.Height - panelHeight - gap));
+            }
+            else
+            {
+                int panelWidth = Math.Max(
+                    1,
+                    (outer.Width - gap) / 2);
+                timerPanel = new Rectangle(
+                    0,
+                    0,
+                    panelWidth,
+                    outer.Height);
+                musicPanel = new Rectangle(
+                    panelWidth + gap,
+                    0,
+                    Math.Max(1, outer.Width - panelWidth - gap),
+                    outer.Height);
+            }
+            int radius = Scale(24);
+            double frostPresence = Clamp01(
+                frostedBlend * frostedIntensity);
+            using (GraphicsPath timerPath = RoundedRectangle(
+                timerPanel,
+                radius))
+            using (GraphicsPath musicPath = RoundedRectangle(
+                musicPanel,
+                radius))
+            {
+                PaintShellBase(
+                    graphics,
+                    timerPath,
+                    timerPanel,
+                    radius,
+                    frostPresence);
+                PaintShellBase(
+                    graphics,
+                    musicPath,
+                    musicPanel,
+                    radius,
+                    frostPresence);
+                DrawShellBorder(
+                    graphics,
+                    timerPath,
+                    frostPresence);
+                DrawShellBorder(
+                    graphics,
+                    musicPath,
+                    frostPresence);
+                if (frostPresence < 0.02)
+                {
+                    DrawGlassSheen(graphics, timerPath, timerPanel);
+                    DrawGlassSheen(graphics, musicPath, musicPanel);
+                    DrawQualityGlass(
+                        graphics,
+                        timerPath,
+                        timerPanel,
+                        radius);
+                    DrawQualityGlass(
+                        graphics,
+                        musicPath,
+                        musicPanel,
+                        radius);
+                }
+            }
+            DrawMultiTimerPanel(graphics, timerPanel);
+            DrawMultiMusicPanel(graphics, musicPanel);
+        }
+
+        private bool CanUseFrostedShellCache()
+        {
+            return
+                Math.Abs(widthVelocity) < 0.05 &&
+                Math.Abs(heightVelocity) < 0.05 &&
+                Math.Abs(animatedWidth - springTargetWidth) < 0.25 &&
+                Math.Abs(animatedHeight - springTargetHeight) < 0.25 &&
+                Math.Abs(frostedBlend - frostedBlendTarget) < 0.01;
+        }
+
+        private bool TryDrawFrostedShellCache(
+            Graphics graphics,
+            GraphicsPath clipPath,
+            double frostPresence)
+        {
+            int width = Math.Max(1, ClientSize.Width);
+            int height = Math.Max(1, ClientSize.Height);
+            int radius = CalculateCornerRadius();
+            bool versionMatches =
+                frostedShellCache != null &&
+                frostedShellVersion == frostedBackdropVersion &&
+                Math.Abs(frostedShellPresence - frostPresence) < 0.002;
+            bool sizeMatches =
+                frostedShellWidth == width &&
+                frostedShellHeight == height &&
+                frostedShellRadius == radius;
+            bool settled = CanUseFrostedShellCache();
+            bool mayRebuild =
+                !versionMatches ||
+                (sizeMatches == false && settled);
+            if (mayRebuild)
+            {
+                using (GraphicsPath fullSurface = new GraphicsPath())
+                {
+                    fullSurface.AddRectangle(
+                        new Rectangle(0, 0, width, height));
+                    Bitmap next = new Bitmap(
+                        width,
+                        height,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    using (Graphics nextGraphics = Graphics.FromImage(next))
+                    {
+                        nextGraphics.SmoothingMode = SmoothingMode.AntiAlias;
+                        nextGraphics.InterpolationMode =
+                            InterpolationMode.HighQualityBicubic;
+                        nextGraphics.PixelOffsetMode =
+                            PixelOffsetMode.HighQuality;
+                        nextGraphics.CompositingQuality =
+                            CompositingQuality.HighQuality;
+                        nextGraphics.Clear(Color.Transparent);
+                        PaintShellBase(
+                            nextGraphics,
+                            fullSurface,
+                            new Rectangle(
+                                0,
+                                0,
+                                Math.Max(1, width - 1),
+                                Math.Max(1, height - 1)),
+                            radius,
+                            frostPresence);
+                    }
+                    if (frostedShellCache != null)
+                    {
+                        frostedShellCache.Dispose();
+                    }
+                    frostedShellCache = next;
+                    frostedShellWidth = width;
+                    frostedShellHeight = height;
+                    frostedShellRadius = radius;
+                    frostedShellVersion = frostedBackdropVersion;
+                    frostedShellPresence = frostPresence;
+                }
+            }
+            if (frostedShellCache == null)
+            {
+                return false;
+            }
+            GraphicsState state = graphics.Save();
+            graphics.SetClip(clipPath);
+            if (frostedShellWidth == width &&
+                frostedShellHeight == height &&
+                frostedShellRadius == radius)
+            {
+                graphics.DrawImageUnscaled(frostedShellCache, 0, 0);
+            }
+            else
+            {
+                graphics.InterpolationMode =
+                    InterpolationMode.Bilinear;
+                graphics.PixelOffsetMode = PixelOffsetMode.HighSpeed;
+                graphics.DrawImage(
+                    frostedShellCache,
+                    new Rectangle(0, 0, width, height));
+            }
+            graphics.Restore(state);
+            return true;
+        }
+
+        private void PaintShellBase(
+            Graphics graphics,
+            GraphicsPath path,
+            Rectangle outer,
+            int radius,
+            double frostPresence)
+        {
+            Color solidTop = Color.FromArgb(255, 26, 26, 29);
+            Color solidBottom = Color.FromArgb(255, 9, 9, 11);
+            double glassVisibility =
+                1.0 - 0.46 * frostPresence;
+            Color glassTop = Color.FromArgb(
+                (int)Math.Round(90 * glassVisibility),
+                45,
+                52,
+                64);
+            Color glassBottom = Color.FromArgb(
+                (int)Math.Round(66 * glassVisibility),
+                14,
+                18,
+                25);
+            DrawFrostedBackdrop(graphics, path, outer);
+            using (LinearGradientBrush background =
+                new LinearGradientBrush(
+                    new Rectangle(
+                        outer.Left,
+                        outer.Top,
+                        Math.Max(1, outer.Width),
+                        Math.Max(2, outer.Height)),
+                    BlendColor(solidTop, glassTop, glassBlend),
+                    BlendColor(solidBottom, glassBottom, glassBlend),
+                    LinearGradientMode.Vertical))
+            {
+                graphics.FillPath(background, path);
+            }
+
+            DrawFrostedGlass(graphics, path, outer);
+        }
+
+        private void DrawShellBorder(
+            Graphics graphics,
+            GraphicsPath path,
+            double frostPresence)
+        {
+            using (Pen border = new Pen(
+                Color.FromArgb(
+                    (int)Math.Round(
+                        (94 + 50 * glassBlend) *
+                        (1.0 - 0.58 * frostPresence)),
+                    185,
+                    190,
+                    184),
+                1f))
+            {
+                graphics.DrawPath(border, path);
             }
         }
 
@@ -2013,6 +2888,149 @@ namespace SmartWindow
             graphics.Restore(state);
         }
 
+        private void DrawFrostedGlass(
+            Graphics graphics,
+            GraphicsPath path,
+            Rectangle bounds)
+        {
+            double strength = Clamp01(
+                frostedBlend *
+                glassBlend *
+                frostedIntensity);
+            if (strength <= 0.01 || bounds.Width < Scale(24))
+            {
+                return;
+            }
+
+            GraphicsState state = graphics.Save();
+            graphics.SetClip(path);
+            Rectangle fillBounds = new Rectangle(
+                bounds.Left - 1,
+                bounds.Top - 1,
+                Math.Max(1, bounds.Width + 2),
+                Math.Max(1, bounds.Height + 2));
+
+            int topAlpha = (int)Math.Round(54 * strength);
+            int bottomAlpha = (int)Math.Round(34 * strength);
+            using (LinearGradientBrush diffuse = new LinearGradientBrush(
+                fillBounds,
+                Color.FromArgb(topAlpha, 8, 10, 15),
+                Color.FromArgb(bottomAlpha, 25, 31, 43),
+                102f))
+            {
+                graphics.FillRectangle(diffuse, fillBounds);
+            }
+
+            Rectangle lightBand = new Rectangle(
+                fillBounds.Left,
+                fillBounds.Top,
+                fillBounds.Width,
+                Math.Max(2, fillBounds.Height / 2));
+            using (LinearGradientBrush softLight = new LinearGradientBrush(
+                lightBand,
+                Color.FromArgb(
+                    (int)Math.Round(7 * strength),
+                    255,
+                    255,
+                    255),
+                Color.Transparent,
+                LinearGradientMode.Vertical))
+            {
+                graphics.FillRectangle(softLight, lightBand);
+            }
+
+            if (frostedNoiseBrush != null)
+            {
+                graphics.FillRectangle(frostedNoiseBrush, fillBounds);
+            }
+            graphics.Restore(state);
+        }
+
+        private void DrawFrostedBackdrop(
+            Graphics graphics,
+            GraphicsPath path,
+            Rectangle bounds)
+        {
+            if (frostedBlend <= 0.01 ||
+                frostedIntensity <= 0.01)
+            {
+                return;
+            }
+
+            lock (frostedBackdropSync)
+            {
+                if (frostedBackdrop == null)
+                {
+                    return;
+                }
+                GraphicsState state = graphics.Save();
+                graphics.SetClip(path);
+                if (frostedBackdrop.Width >= bounds.Width &&
+                    frostedBackdrop.Height >= bounds.Height)
+                {
+                    graphics.DrawImageUnscaled(frostedBackdrop, 0, 0);
+                }
+                else
+                {
+                    graphics.InterpolationMode =
+                        InterpolationMode.HighQualityBilinear;
+                    graphics.DrawImage(
+                        frostedBackdrop,
+                        new Rectangle(
+                            bounds.Left,
+                            bounds.Top,
+                            bounds.Width,
+                            bounds.Height));
+                }
+                graphics.Restore(state);
+            }
+        }
+
+        private void RebuildFrostedNoiseTile()
+        {
+            if (frostedNoiseBrush != null)
+            {
+                frostedNoiseBrush.Dispose();
+            }
+            if (frostedNoiseTile != null)
+            {
+                frostedNoiseTile.Dispose();
+            }
+
+            const int size = 96;
+            frostedNoiseTile = new Bitmap(
+                size,
+                size,
+                System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (Graphics graphics = Graphics.FromImage(frostedNoiseTile))
+            {
+                graphics.Clear(Color.Transparent);
+            }
+
+            Random random = new Random(0x1A113);
+            int baseAlpha = Math.Max(
+                1,
+                (int)Math.Round(
+                    1.0 + 2.0 * Clamp01(frostedIntensity)));
+            int pointCount = 540;
+            for (int index = 0; index < pointCount; index++)
+            {
+                bool light = random.NextDouble() >= 0.42;
+                int alpha = Math.Max(
+                    1,
+                    baseAlpha - random.Next(0, 4));
+                frostedNoiseTile.SetPixel(
+                    random.Next(size),
+                    random.Next(size),
+                    light
+                        ? Color.FromArgb(alpha, 255, 255, 255)
+                        : Color.FromArgb(alpha, 32, 42, 58));
+            }
+            frostedNoiseBrush = new TextureBrush(
+                frostedNoiseTile,
+                WrapMode.TileFlipXY);
+        }
+
         private void DrawQualityGlass(
             Graphics graphics,
             GraphicsPath path,
@@ -2035,52 +3053,59 @@ namespace SmartWindow
                 Math.Max(1, bounds.Width - inset * 2),
                 Math.Max(1, bounds.Height - inset * 2));
             int innerRadius = Math.Max(1, radius - inset);
-            using (GraphicsPath innerPath = RoundedRectangle(inner, innerRadius))
-            using (Pen refraction = new Pen(
-                Color.FromArgb(
-                    (int)Math.Round(92 * strength),
-                    242,
-                    250,
-                    255),
-                Math.Max(1f, Scale(1))))
+            bool flatFrost =
+                frostedBlend * frostedIntensity > 0.02;
+            if (!flatFrost)
             {
-                graphics.DrawPath(refraction, innerPath);
-            }
+                using (GraphicsPath innerPath = RoundedRectangle(
+                    inner,
+                    innerRadius))
+                using (Pen refraction = new Pen(
+                    Color.FromArgb(
+                        (int)Math.Round(92 * strength),
+                        242,
+                        250,
+                        255),
+                    Math.Max(1f, Scale(1))))
+                {
+                    graphics.DrawPath(refraction, innerPath);
+                }
 
-            Rectangle lowerInner = new Rectangle(
-                inner.Left,
-                inner.Top + Math.Max(1, inner.Height / 2),
-                inner.Width,
-                Math.Max(1, inner.Height - inner.Height / 2));
-            using (LinearGradientBrush depth = new LinearGradientBrush(
-                lowerInner,
-                Color.Transparent,
-                Color.FromArgb(
-                    (int)Math.Round(58 * strength),
-                    0,
-                    3,
-                    8),
-                LinearGradientMode.Vertical))
-            {
-                graphics.FillRectangle(depth, lowerInner);
-            }
+                Rectangle lowerInner = new Rectangle(
+                    inner.Left,
+                    inner.Top + Math.Max(1, inner.Height / 2),
+                    inner.Width,
+                    Math.Max(1, inner.Height - inner.Height / 2));
+                using (LinearGradientBrush depth = new LinearGradientBrush(
+                    lowerInner,
+                    Color.Transparent,
+                    Color.FromArgb(
+                        (int)Math.Round(58 * strength),
+                        0,
+                        3,
+                        8),
+                    LinearGradientMode.Vertical))
+                {
+                    graphics.FillRectangle(depth, lowerInner);
+                }
 
-            Rectangle upperLight = new Rectangle(
-                inner.Left,
-                inner.Top,
-                inner.Width,
-                Math.Max(3, inner.Height / 3));
-            using (LinearGradientBrush volume = new LinearGradientBrush(
-                upperLight,
-                Color.FromArgb(
-                    (int)Math.Round(48 * strength),
-                    255,
-                    255,
-                    255),
-                Color.Transparent,
-                LinearGradientMode.Vertical))
-            {
-                graphics.FillRectangle(volume, upperLight);
+                Rectangle upperLight = new Rectangle(
+                    inner.Left,
+                    inner.Top,
+                    inner.Width,
+                    Math.Max(3, inner.Height / 3));
+                using (LinearGradientBrush volume = new LinearGradientBrush(
+                    upperLight,
+                    Color.FromArgb(
+                        (int)Math.Round(48 * strength),
+                        255,
+                        255,
+                        255),
+                    Color.Transparent,
+                    LinearGradientMode.Vertical))
+                {
+                    graphics.FillRectangle(volume, upperLight);
+                }
             }
 
             double flow = (qualityParticleSeconds * 0.19) % 1.0;
@@ -2401,6 +3426,32 @@ namespace SmartWindow
                     circle.Width + 6,
                     circle.Height + 6);
             }
+            if (currentIsTimer && timerSnapshot != null)
+            {
+                Color accent = timerSnapshot.AccentColor;
+                RectangleF timerIcon = new RectangleF(
+                    circle.Left + circle.Width * 0.24f,
+                    circle.Top + circle.Height * 0.20f,
+                    circle.Width * 0.52f,
+                    circle.Height * 0.60f);
+                if (timerSnapshot.Mode == SmartTimerMode.Countdown)
+                {
+                    DrawHourglassIcon(
+                        graphics,
+                        Rectangle.Round(timerIcon),
+                        accent,
+                        timerSnapshot.IsRunning);
+                }
+                else
+                {
+                    DrawStopwatchIcon(
+                        graphics,
+                        Rectangle.Round(timerIcon),
+                        accent,
+                        timerSnapshot.DisplayTime);
+                }
+                return;
+            }
             DrawNotificationGlyph(graphics, circle);
         }
 
@@ -2687,6 +3738,860 @@ namespace SmartWindow
                         y);
                 }
             }
+        }
+
+        private void DrawTimer(Graphics graphics)
+        {
+            TimerSnapshot snapshot = timerSnapshot;
+            if (snapshot == null)
+            {
+                return;
+            }
+            if (SideDocked)
+            {
+                DrawSideTimer(graphics, snapshot);
+                return;
+            }
+
+            Color accent = snapshot.AccentColor;
+            int width = ClientSize.Width;
+            int height = ClientSize.Height;
+            bool musicCompanion =
+                !timerExpanded &&
+                HasMusicCompanion();
+            int horizontalInset = musicCompanion ? Scale(24) : 0;
+            int contentWidth = Math.Max(
+                1,
+                width - horizontalInset * 2);
+            if (musicCompanion)
+            {
+                using (Pen companion = new Pen(
+                    Color.FromArgb(176, 54, 59, 70),
+                    Math.Max(2f, Scale(3))))
+                {
+                    graphics.DrawArc(
+                        companion,
+                        Scale(4),
+                        Scale(19),
+                        Scale(16),
+                        Scale(38),
+                        90,
+                        180);
+                    graphics.DrawArc(
+                        companion,
+                        width - Scale(20),
+                        Scale(19),
+                        Scale(16),
+                        Scale(38),
+                        -90,
+                        180);
+                }
+            }
+
+            Rectangle iconBounds = new Rectangle(
+                horizontalInset + Scale(20),
+                Scale(15),
+                Scale(44),
+                Scale(44));
+            if (snapshot.Mode == SmartTimerMode.Countdown)
+            {
+                DrawHourglassIcon(
+                    graphics,
+                    iconBounds,
+                    accent,
+                    snapshot.IsRunning);
+            }
+            else
+            {
+                DrawStopwatchIcon(
+                    graphics,
+                    iconBounds,
+                    accent,
+                    snapshot.DisplayTime);
+            }
+
+            string timeText = snapshot.FormattedTime;
+            DrawText(
+                graphics,
+                timeText,
+                timerTimeFont,
+                new Rectangle(
+                    horizontalInset + Scale(88),
+                    Scale(9),
+                    Math.Max(1, contentWidth - Scale(112)),
+                    Scale(48)),
+                accent,
+                ContentAlignment.MiddleRight);
+            DrawText(
+                graphics,
+                snapshot.IsCompleted
+                    ? Localization.Get("timerFinished")
+                    : (snapshot.IsPaused
+                        ? Localization.Get("timerPaused")
+                        : Localization.Get("timerRunning")),
+                microFont,
+                new Rectangle(
+                    horizontalInset + Scale(90),
+                    Scale(48),
+                    Math.Max(1, contentWidth - Scale(114)),
+                    Scale(16)),
+                Color.FromArgb(
+                    152,
+                    accent.R,
+                    accent.G,
+                    accent.B),
+                ContentAlignment.MiddleRight);
+
+            if (!timerExpanded || height < Scale(130))
+            {
+                return;
+            }
+
+            using (Pen divider = new Pen(
+                Color.FromArgb(34, 255, 255, 255),
+                1f))
+            {
+                graphics.DrawLine(
+                    divider,
+                    horizontalInset + Scale(18),
+                    Scale(78),
+                    horizontalInset + contentWidth - Scale(18),
+                    Scale(78));
+            }
+
+            int buttonCount = snapshot.Mode == SmartTimerMode.Stopwatch
+                ? 3
+                : 2;
+            int gap = Scale(8);
+            int left = horizontalInset + Scale(18);
+            int available = contentWidth - Scale(36) - gap * (buttonCount - 1);
+            int buttonWidth = Math.Max(1, available / buttonCount);
+            int buttonTop = Scale(92);
+            int buttonHeight = Scale(48);
+            Rectangle primary = new Rectangle(
+                left,
+                buttonTop,
+                buttonWidth,
+                buttonHeight);
+            DrawTimerButton(
+                graphics,
+                primary,
+                snapshot.IsCompleted
+                    ? Localization.Get("timerClose")
+                    : (snapshot.IsPaused
+                        ? Localization.Get("timerResume")
+                        : Localization.Get("timerPause")),
+                accent,
+                true);
+            int secondLeft = primary.Right + gap;
+            if (snapshot.Mode == SmartTimerMode.Stopwatch)
+            {
+                Rectangle lap = new Rectangle(
+                    secondLeft,
+                    buttonTop,
+                    buttonWidth,
+                    buttonHeight);
+                DrawTimerButton(
+                    graphics,
+                    lap,
+                    Localization.Get("timerLap"),
+                    accent,
+                    false);
+                secondLeft = lap.Right + gap;
+            }
+            DrawTimerButton(
+                graphics,
+                new Rectangle(
+                    secondLeft,
+                    buttonTop,
+                    buttonWidth,
+                    buttonHeight),
+                Localization.Get("timerCancel"),
+                accent,
+                false);
+
+            if (snapshot.Mode == SmartTimerMode.Stopwatch &&
+                snapshot.Laps != null &&
+                snapshot.Laps.Length > 0)
+            {
+                DrawText(
+                    graphics,
+                    Localization.Get("timerLastLap") +
+                        "  " +
+                        FormatClock(snapshot.Laps[0]) +
+                        "   × " +
+                        snapshot.LapCount,
+                    microFont,
+                    new Rectangle(
+                        horizontalInset + Scale(20),
+                        Scale(150),
+                        contentWidth - Scale(40),
+                        Scale(18)),
+                    Color.FromArgb(150, accent.R, accent.G, accent.B),
+                    ContentAlignment.MiddleCenter);
+            }
+        }
+
+        private void DrawSideTimer(
+            Graphics graphics,
+            TimerSnapshot snapshot)
+        {
+            Color accent = snapshot.AccentColor;
+            int width = ClientSize.Width;
+            int height = ClientSize.Height;
+            bool musicCompanion =
+                !timerExpanded &&
+                HasMusicCompanion();
+            int inset = musicCompanion ? Scale(22) : 0;
+            if (musicCompanion)
+            {
+                using (Pen companion = new Pen(
+                    Color.FromArgb(176, 54, 59, 70),
+                    Math.Max(2f, Scale(3))))
+                {
+                    graphics.DrawArc(
+                        companion,
+                        Scale(4),
+                        height / 2 - Scale(20),
+                        Scale(16),
+                        Scale(40),
+                        90,
+                        180);
+                    graphics.DrawArc(
+                        companion,
+                        width - Scale(20),
+                        height / 2 - Scale(20),
+                        Scale(16),
+                        Scale(40),
+                        -90,
+                        180);
+                }
+            }
+            Rectangle icon = new Rectangle(
+                (width - Scale(46)) / 2,
+                Scale(18),
+                Scale(46),
+                Scale(46));
+            if (snapshot.Mode == SmartTimerMode.Countdown)
+            {
+                DrawHourglassIcon(
+                    graphics,
+                    icon,
+                    accent,
+                    snapshot.IsRunning);
+            }
+            else
+            {
+                DrawStopwatchIcon(
+                    graphics,
+                    icon,
+                    accent,
+                    snapshot.DisplayTime);
+            }
+            DrawText(
+                graphics,
+                snapshot.FormattedTime,
+                timerTimeFont,
+                new Rectangle(
+                    inset + Scale(8),
+                    Scale(70),
+                    Math.Max(1, width - inset * 2 - Scale(16)),
+                    Scale(52)),
+                accent,
+                ContentAlignment.MiddleCenter);
+            DrawText(
+                graphics,
+                snapshot.IsCompleted
+                    ? Localization.Get("timerFinished")
+                    : (snapshot.IsPaused
+                        ? Localization.Get("timerPaused")
+                        : Localization.Get("timerRunning")),
+                microFont,
+                new Rectangle(
+                    inset + Scale(8),
+                    Scale(122),
+                    Math.Max(1, width - inset * 2 - Scale(16)),
+                    Scale(18)),
+                Color.FromArgb(145, accent.R, accent.G, accent.B),
+                ContentAlignment.MiddleCenter);
+
+            if (!timerExpanded || height < Scale(210))
+            {
+                return;
+            }
+            using (Pen divider = new Pen(
+                Color.FromArgb(34, 255, 255, 255),
+                1f))
+            {
+                graphics.DrawLine(
+                    divider,
+                    Scale(18),
+                    Scale(154),
+                    width - Scale(18),
+                    Scale(154));
+            }
+
+            int buttonCount = snapshot.Mode == SmartTimerMode.Stopwatch
+                ? 3
+                : 2;
+            int gap = Scale(8);
+            int left = Scale(18);
+            int available =
+                width - Scale(36) - gap * (buttonCount - 1);
+            int buttonWidth = Math.Max(1, available / buttonCount);
+            int buttonTop = height - Scale(58);
+            for (int index = 0; index < buttonCount; index++)
+            {
+                string label = index == 0
+                    ? (snapshot.IsCompleted
+                        ? Localization.Get("timerClose")
+                        : (snapshot.IsPaused
+                            ? Localization.Get("timerResume")
+                            : Localization.Get("timerPause")))
+                    : (snapshot.Mode == SmartTimerMode.Stopwatch &&
+                       index == 1
+                        ? Localization.Get("timerLap")
+                        : Localization.Get("timerCancel"));
+                DrawTimerButton(
+                    graphics,
+                    new Rectangle(
+                        left + index * (buttonWidth + gap),
+                        buttonTop,
+                        buttonWidth,
+                        Scale(42)),
+                    label,
+                    accent,
+                    index == 0);
+            }
+        }
+
+        private bool HasMusicCompanion()
+        {
+            return musicModeEnabled &&
+                mediaState != null &&
+                mediaState.IsPlaying;
+        }
+
+        private void DrawMultiTimerPanel(
+            Graphics graphics,
+            Rectangle panel)
+        {
+            if (timerSnapshot == null)
+            {
+                return;
+            }
+            Color accent = timerSnapshot.AccentColor;
+            DrawText(
+                graphics,
+                timerSnapshot.Mode == SmartTimerMode.Countdown
+                    ? Localization.Get("timerCountdown")
+                    : Localization.Get("timerStopwatch"),
+                microFont,
+                new Rectangle(
+                    panel.Left + 18,
+                    panel.Top + 11,
+                    panel.Width - 36,
+                    18),
+                Color.FromArgb(150, accent.R, accent.G, accent.B),
+                ContentAlignment.MiddleLeft);
+            Rectangle icon = new Rectangle(
+                panel.Left + 18,
+                panel.Top + 38,
+                Scale(42),
+                Scale(42));
+            if (timerSnapshot.Mode == SmartTimerMode.Countdown)
+            {
+                DrawHourglassIcon(
+                    graphics,
+                    icon,
+                    accent,
+                    timerSnapshot.IsRunning);
+            }
+            else
+            {
+                DrawStopwatchIcon(
+                    graphics,
+                    icon,
+                    accent,
+                    timerSnapshot.DisplayTime);
+            }
+            DrawText(
+                graphics,
+                timerSnapshot.FormattedTime,
+                timerTimeFont,
+                new Rectangle(
+                    panel.Left + 76,
+                    panel.Top + 25,
+                    panel.Width - 94,
+                    Scale(50)),
+                accent,
+                ContentAlignment.MiddleRight);
+            DrawText(
+                graphics,
+                timerSnapshot.IsCompleted
+                    ? Localization.Get("timerFinished")
+                    : (timerSnapshot.IsPaused
+                        ? Localization.Get("timerPaused")
+                        : Localization.Get("timerRunning")),
+                microFont,
+                new Rectangle(
+                    panel.Left + 18,
+                    panel.Top + 87,
+                    panel.Width - 36,
+                    Scale(18)),
+                Color.FromArgb(132, accent.R, accent.G, accent.B),
+                ContentAlignment.MiddleRight);
+
+            int count = timerSnapshot.Mode == SmartTimerMode.Stopwatch
+                ? 3
+                : 2;
+            int gap = Scale(8);
+            int padding = Scale(18);
+            int width = Math.Max(
+                Scale(38),
+                (panel.Width - padding * 2 - gap * (count - 1)) / count);
+            for (int index = 0; index < count; index++)
+            {
+                Rectangle button = new Rectangle(
+                    panel.Left + padding + index * (width + gap),
+                    panel.Top + Scale(120),
+                    width,
+                    Scale(44));
+                string label = index == 0
+                    ? (timerSnapshot.IsCompleted
+                        ? Localization.Get("timerClose")
+                        : (timerSnapshot.IsPaused
+                            ? Localization.Get("timerResume")
+                            : Localization.Get("timerPause")))
+                    : (timerSnapshot.Mode == SmartTimerMode.Stopwatch &&
+                       index == 1
+                        ? Localization.Get("timerLap")
+                        : Localization.Get("timerCancel"));
+                DrawTimerButton(
+                    graphics,
+                    button,
+                    label,
+                    accent,
+                    index == 0);
+            }
+        }
+
+        private void DrawMultiMusicPanel(
+            Graphics graphics,
+            Rectangle panel)
+        {
+            MediaPlaybackState state = mediaState;
+            string title = state == null ||
+                string.IsNullOrWhiteSpace(state.Title)
+                    ? Localization.Get("nowPlaying")
+                    : state.Title;
+            string artist = state == null ||
+                string.IsNullOrWhiteSpace(state.Artist)
+                    ? (state == null ? "" : state.Album)
+                    : state.Artist;
+            string appName = state == null ||
+                string.IsNullOrWhiteSpace(state.AppName)
+                    ? Localization.Get("media")
+                    : state.AppName;
+            string album = state == null
+                ? ""
+                : state.Album;
+            string secondary = artist;
+            if (!string.IsNullOrWhiteSpace(album) &&
+                !string.Equals(
+                    album,
+                    artist,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                secondary = artist +
+                    (string.IsNullOrWhiteSpace(artist) ? "" : " · ") +
+                    album;
+            }
+            Rectangle artwork = new Rectangle(
+                panel.Left + 16,
+                panel.Top + 15,
+                Scale(54),
+                Scale(54));
+            DrawMultiArtwork(graphics, artwork);
+
+            DrawText(
+                graphics,
+                appName.ToUpperInvariant(),
+                microFont,
+                new Rectangle(
+                    panel.Left + 82,
+                    panel.Top + 14,
+                    panel.Width - 100,
+                    16),
+                Color.FromArgb(145, 218, 218, 211),
+                ContentAlignment.MiddleLeft);
+            DrawScrollingText(
+                graphics,
+                title,
+                titleFont,
+                new RectangleF(
+                    panel.Left + 82,
+                    panel.Top + 30,
+                    panel.Width - 100,
+                    25),
+                Color.FromArgb(242, 241, 236),
+                1.0,
+                musicPaused ? 0.0 : waveformSeconds * 0.35);
+            DrawScrollingText(
+                graphics,
+                secondary,
+                microFont,
+                new RectangleF(
+                    panel.Left + 82,
+                    panel.Top + 56,
+                    panel.Width - 100,
+                    18),
+                Color.FromArgb(150, 210, 213, 210),
+                1.0,
+                musicPaused ? 0.0 : waveformSeconds * 0.23);
+
+            Rectangle progress = MultiMusicProgressBounds;
+            using (Pen progressTrack = new Pen(
+                Color.FromArgb(35, 255, 255, 255),
+                3f))
+            using (Pen progressFill = new Pen(
+                Color.FromArgb(194, musicAccent.R, musicAccent.G, musicAccent.B),
+                3f))
+            {
+                progressTrack.StartCap = LineCap.Round;
+                progressTrack.EndCap = LineCap.Round;
+                progressFill.StartCap = LineCap.Round;
+                progressFill.EndCap = LineCap.Round;
+                float y = progress.Top + progress.Height / 2f;
+                graphics.DrawLine(
+                    progressTrack,
+                    progress.Left,
+                    y,
+                    progress.Right,
+                    y);
+                double ratio = state == null ||
+                    state.DurationSeconds <= 0.1
+                        ? 0.0
+                        : Clamp01(
+                            state.PositionSeconds /
+                            state.DurationSeconds);
+                graphics.DrawLine(
+                    progressFill,
+                    progress.Left,
+                    y,
+                    progress.Left +
+                        (float)(progress.Width * ratio),
+                    y);
+            }
+
+            int barLeft = panel.Right - Scale(112);
+            int barTop = panel.Top + Scale(101);
+            double motion = musicPaused ? 0.12 : 1.0;
+            for (int index = 0; index < 16; index++)
+            {
+                double phase = waveformSeconds * 7.5 + index * 0.72;
+                int barHeight = Math.Max(
+                    Scale(3),
+                    (int)Math.Round(
+                        Scale(3) +
+                        Scale(15) *
+                        Math.Abs(Math.Sin(phase)) *
+                        motion));
+                using (Pen bar = new Pen(
+                    Color.FromArgb(
+                        210,
+                        musicAccent.R,
+                        musicAccent.G,
+                        musicAccent.B),
+                    Math.Max(1.5f, Scale(2))))
+                {
+                    bar.StartCap = LineCap.Round;
+                    bar.EndCap = LineCap.Round;
+                    int x = barLeft + index * Scale(6);
+                    graphics.DrawLine(
+                        bar,
+                        x,
+                        barTop - barHeight / 2,
+                        x,
+                        barTop + barHeight / 2);
+                }
+            }
+
+            int buttonGap = Scale(8);
+            int padding = Scale(16);
+            int width = Math.Max(
+                Scale(38),
+                (panel.Width - padding * 2 - buttonGap * 2) / 3);
+            string[] labels = new string[]
+            {
+                Localization.Get("previous"),
+                musicPaused
+                    ? Localization.Get("resume")
+                    : Localization.Get("pause"),
+                Localization.Get("next")
+            };
+            for (int index = 0; index < 3; index++)
+            {
+                DrawTimerButton(
+                    graphics,
+                    new Rectangle(
+                        panel.Left + padding +
+                            index * (width + buttonGap),
+                        panel.Top + Scale(120),
+                        width,
+                        Scale(44)),
+                    labels[index],
+                    musicAccent,
+                    index == 1);
+            }
+        }
+
+        private void DrawMultiArtwork(
+            Graphics graphics,
+            Rectangle bounds)
+        {
+            Image artwork = LoadAlbumArtwork();
+            using (GraphicsPath path = RoundedRectangle(
+                bounds,
+                Math.Max(3, Scale(7))))
+            {
+                GraphicsState state = graphics.Save();
+                graphics.SetClip(path);
+                if (artwork != null)
+                {
+                    double scale = Math.Max(
+                        bounds.Width / (double)artwork.Width,
+                        bounds.Height / (double)artwork.Height);
+                    int width = (int)Math.Ceiling(
+                        artwork.Width * scale);
+                    int height = (int)Math.Ceiling(
+                        artwork.Height * scale);
+                    graphics.DrawImage(
+                        artwork,
+                        new Rectangle(
+                            bounds.Left + (bounds.Width - width) / 2,
+                            bounds.Top + (bounds.Height - height) / 2,
+                            width,
+                            height));
+                }
+                else
+                {
+                    using (LinearGradientBrush fill =
+                        new LinearGradientBrush(
+                            bounds,
+                            Color.FromArgb(70, musicAccent.R, musicAccent.G, musicAccent.B),
+                            Color.FromArgb(25, 21, 25, 32),
+                            55f))
+                    {
+                        graphics.FillRectangle(fill, bounds);
+                    }
+                    DrawText(
+                        graphics,
+                        "♪",
+                        titleFont,
+                        bounds,
+                        Color.FromArgb(218, 240, 220, 172),
+                        ContentAlignment.MiddleCenter);
+                }
+                graphics.Restore(state);
+            }
+        }
+
+        private void DrawTimerButton(
+            Graphics graphics,
+            Rectangle bounds,
+            string label,
+            Color accent,
+            bool primary)
+        {
+            using (GraphicsPath path = RoundedRectangle(
+                bounds,
+                Scale(12)))
+            using (SolidBrush fill = new SolidBrush(
+                primary
+                    ? Color.FromArgb(
+                        78,
+                        accent.R,
+                        accent.G,
+                        accent.B)
+                    : Color.FromArgb(24, 255, 255, 255)))
+            using (Pen border = new Pen(
+                primary
+                    ? Color.FromArgb(
+                        150,
+                        accent.R,
+                        accent.G,
+                        accent.B)
+                    : Color.FromArgb(38, 255, 255, 255),
+                1f))
+            {
+                graphics.FillPath(fill, path);
+                graphics.DrawPath(border, path);
+            }
+            DrawText(
+                graphics,
+                label,
+                microFont,
+                bounds,
+                primary
+                    ? Color.FromArgb(
+                        240,
+                        Math.Min(255, accent.R + 32),
+                        Math.Min(255, accent.G + 32),
+                        Math.Min(255, accent.B + 32))
+                    : Color.FromArgb(190, 227, 229, 227),
+                ContentAlignment.MiddleCenter);
+        }
+
+        private void DrawHourglassIcon(
+            Graphics graphics,
+            Rectangle bounds,
+            Color accent,
+            bool running)
+        {
+            GraphicsState state = graphics.Save();
+            double angle = running
+                ? Math.Sin(timerAnimationSeconds * 2.3) * 18.0
+                : 0.0;
+            graphics.TranslateTransform(
+                bounds.Left + bounds.Width / 2f,
+                bounds.Top + bounds.Height / 2f);
+            graphics.RotateTransform((float)angle);
+            float halfWidth = bounds.Width * 0.27f;
+            float halfHeight = bounds.Height * 0.38f;
+            PointF[] upper = new PointF[]
+            {
+                new PointF(-halfWidth, -halfHeight),
+                new PointF(halfWidth, -halfHeight),
+                new PointF(0f, 0f)
+            };
+            PointF[] lower = new PointF[]
+            {
+                new PointF(0f, 0f),
+                new PointF(halfWidth, halfHeight),
+                new PointF(-halfWidth, halfHeight)
+            };
+            using (SolidBrush fill = new SolidBrush(accent))
+            using (Pen rim = new Pen(
+                Color.FromArgb(
+                    220,
+                    Math.Min(255, accent.R + 48),
+                    Math.Min(255, accent.G + 48),
+                    Math.Min(255, accent.B + 48)),
+                Math.Max(1.2f, Scale(2))))
+            {
+                graphics.FillPolygon(fill, upper);
+                graphics.FillPolygon(fill, lower);
+                graphics.DrawLine(
+                    rim,
+                    -halfWidth - Scale(2),
+                    -halfHeight,
+                    halfWidth + Scale(2),
+                    -halfHeight);
+                graphics.DrawLine(
+                    rim,
+                    -halfWidth - Scale(2),
+                    halfHeight,
+                    halfWidth + Scale(2),
+                    halfHeight);
+            }
+            graphics.Restore(state);
+        }
+
+        private void DrawStopwatchIcon(
+            Graphics graphics,
+            Rectangle bounds,
+            Color accent,
+            TimeSpan elapsed)
+        {
+            Rectangle dial = new Rectangle(
+                bounds.Left + Scale(3),
+                bounds.Top + Scale(5),
+                bounds.Width - Scale(6),
+                bounds.Height - Scale(8));
+            using (SolidBrush fill = new SolidBrush(accent))
+            {
+                graphics.FillEllipse(fill, dial);
+            }
+            using (Pen crown = new Pen(
+                Color.FromArgb(
+                    225,
+                    Math.Min(255, accent.R + 40),
+                    Math.Min(255, accent.G + 40),
+                    Math.Min(255, accent.B + 40)),
+                Math.Max(1.5f, Scale(2))))
+            {
+                graphics.DrawLine(
+                    crown,
+                    dial.Left + dial.Width / 2,
+                    bounds.Top + Scale(1),
+                    dial.Left + dial.Width / 2,
+                    dial.Top + Scale(4));
+                graphics.DrawLine(
+                    crown,
+                    dial.Right - Scale(4),
+                    dial.Top + Scale(7),
+                    dial.Right - Scale(1),
+                    dial.Top + Scale(11));
+            }
+            double seconds = elapsed.TotalSeconds;
+            double angle =
+                ((seconds % 60.0) / 60.0) *
+                Math.PI * 2.0 -
+                Math.PI / 2.0;
+            double luminance =
+                (0.299 * accent.R +
+                 0.587 * accent.G +
+                 0.114 * accent.B) /
+                255.0;
+            Color handColor = luminance > 0.57
+                ? Color.FromArgb(235, 15, 24, 35)
+                : Color.FromArgb(245, 245, 250, 252);
+            Color outlineColor = luminance > 0.57
+                ? Color.FromArgb(120, 255, 255, 255)
+                : Color.FromArgb(100, 8, 15, 24);
+            float centerX = dial.Left + dial.Width / 2f;
+            float centerY = dial.Top + dial.Height / 2f;
+            float handX = centerX +
+                (float)(Math.Cos(angle) * dial.Width * 0.28);
+            float handY = centerY +
+                (float)(Math.Sin(angle) * dial.Height * 0.28);
+            using (Pen outline = new Pen(
+                outlineColor,
+                Math.Max(3f, Scale(3))))
+            {
+                outline.StartCap = LineCap.Round;
+                outline.EndCap = LineCap.Round;
+                graphics.DrawLine(
+                    outline,
+                    centerX,
+                    centerY,
+                    handX,
+                    handY);
+            }
+            using (Pen hand = new Pen(
+                handColor,
+                Math.Max(1.5f, Scale(2))))
+            {
+                hand.StartCap = LineCap.Round;
+                hand.EndCap = LineCap.Round;
+                graphics.DrawLine(
+                    hand,
+                    centerX,
+                    centerY,
+                    handX,
+                    handY);
+            }
+        }
+
+        private static string FormatClock(TimeSpan value)
+        {
+            long totalSeconds = Math.Max(
+                0,
+                (long)Math.Floor(value.TotalSeconds));
+            return (totalSeconds / 60).ToString("00") +
+                ":" +
+                (totalSeconds % 60).ToString("00");
         }
 
         private void DrawMusic(Graphics graphics)
@@ -3867,6 +5772,36 @@ namespace SmartWindow
             }
         }
 
+        private static void DrawText(
+            Graphics graphics,
+            string text,
+            Font font,
+            Rectangle bounds,
+            Color color,
+            ContentAlignment alignment)
+        {
+            DrawFadingText(
+                graphics,
+                text,
+                font,
+                bounds,
+                color,
+                1.0,
+                false,
+                alignment == ContentAlignment.MiddleCenter ||
+                    alignment == ContentAlignment.TopCenter
+                    ? StringAlignment.Center
+                    : (alignment == ContentAlignment.MiddleRight ||
+                       alignment == ContentAlignment.TopRight
+                        ? StringAlignment.Far
+                        : StringAlignment.Near),
+                alignment == ContentAlignment.MiddleLeft ||
+                    alignment == ContentAlignment.MiddleCenter ||
+                    alignment == ContentAlignment.MiddleRight
+                    ? StringAlignment.Center
+                    : StringAlignment.Near);
+        }
+
         private void DrawScrollingText(
             Graphics graphics,
             string text,
@@ -3988,6 +5923,126 @@ namespace SmartWindow
         {
             if (DateTime.UtcNow < suppressClickUntil)
             {
+                return;
+            }
+            if (currentIsTimer &&
+                current != null &&
+                phase == VisualPhase.Timer)
+            {
+                if (!timerExpanded)
+                {
+                    timerExpanded = true;
+                    SetSpringTarget(
+                        HasMusicCompanion()
+                            ? TimerMultiWindowWidth
+                            : TimerWindowWidth,
+                        HasMusicCompanion()
+                            ? TimerMultiWindowHeight
+                            : TimerExpandedWindowHeight,
+                        0.0);
+                    StartFrameClock();
+                    ResetControlsTimeout();
+                    RequestRender();
+                    return;
+                }
+
+                int timerButton = HitTestTimerButton(e.Location);
+                if (timerButton == 0)
+                {
+                    EventHandler<SmartTimerMode> handler = timerSnapshot != null &&
+                        timerSnapshot.IsCompleted
+                            ? TimerCancelRequested
+                            : TimerPauseToggleRequested;
+                    if (handler != null)
+                    {
+                        handler(this, timerSnapshot.Mode);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+                if (timerButton == 1 &&
+                    timerSnapshot != null &&
+                    timerSnapshot.Mode == SmartTimerMode.Stopwatch)
+                {
+                    EventHandler<SmartTimerMode> handler =
+                        TimerLapRequested;
+                    if (handler != null)
+                    {
+                        handler(this, SmartTimerMode.Stopwatch);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+                if (timerButton >= 1)
+                {
+                    EventHandler<SmartTimerMode> handler =
+                        TimerCancelRequested;
+                    if (handler != null)
+                    {
+                        handler(this, timerSnapshot.Mode);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+
+                int musicButton = HitTestMultiMusicButton(e.Location);
+                if (musicButton >= 0)
+                {
+                    MediaCommandAction action =
+                        musicButton == 0
+                            ? MediaCommandAction.Previous
+                            : (musicButton == 1
+                                ? MediaCommandAction.TogglePlayPause
+                                : MediaCommandAction.Next);
+                    EventHandler<MediaCommandAction> handler =
+                        MediaCommandRequested;
+                    if (handler != null)
+                    {
+                        handler(this, action);
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+                if (IsMultiWindowExpanded &&
+                    MultiMusicPanelBounds.Contains(e.Location))
+                {
+                    Rectangle progress = MultiMusicProgressBounds;
+                    if (progress.Contains(e.Location) &&
+                        mediaState != null &&
+                        mediaState.DurationSeconds > 0.1)
+                    {
+                        double fraction = Clamp01(
+                            (e.X - progress.Left) /
+                            (double)Math.Max(1, progress.Width));
+                        EventHandler<double> seekHandler = SeekRequested;
+                        if (seekHandler != null)
+                        {
+                            seekHandler(
+                                this,
+                                mediaState.DurationSeconds * fraction);
+                        }
+                    }
+                    else if (e.Y <
+                        MultiMusicPanelBounds.Top + Scale(118))
+                    {
+                        EventHandler sourceHandler =
+                            MediaSourceOpenRequested;
+                        if (sourceHandler != null)
+                        {
+                            sourceHandler(this, EventArgs.Empty);
+                        }
+                    }
+                    ResetControlsTimeout();
+                    return;
+                }
+
+                StopControlsTimeout();
+                timerExpanded = false;
+                SetSpringTarget(
+                    TimerWindowWidth,
+                    TimerCompactWindowHeight,
+                    0.0);
+                RequestRender();
                 return;
             }
             if (currentIsMedia && current != null &&
@@ -4122,6 +6177,18 @@ namespace SmartWindow
             {
                 return;
             }
+            if (currentIsTimer &&
+                timerExpanded &&
+                HitTestTimerButton(e.Location) >= 0)
+            {
+                return;
+            }
+            if (currentIsTimer &&
+                timerExpanded &&
+                HitTestMultiMusicButton(e.Location) >= 0)
+            {
+                return;
+            }
 
             dragStartScreen = Control.MousePosition;
             dragLastScreen = dragStartScreen;
@@ -4138,6 +6205,10 @@ namespace SmartWindow
 
         private void OnIslandMouseMove(object sender, MouseEventArgs e)
         {
+            if (currentIsTimer && timerExpanded)
+            {
+                ResetControlsTimeout();
+            }
             if (draggingVolume)
             {
                 UpdateVolumeFromPoint(e.X);
@@ -4361,6 +6432,99 @@ namespace SmartWindow
                 Scale(24));
         }
 
+        private Rectangle CalculateDockedBounds(
+            Screen screen,
+            int width,
+            int height,
+            DockEdge edge,
+            int position)
+        {
+            Rectangle area = screen.WorkingArea;
+            int margin = Scale(7);
+            int left;
+            int top;
+            if (edge == DockEdge.Bottom)
+            {
+                left = PositionedHorizontal(
+                    area,
+                    width,
+                    margin,
+                    position);
+                top = area.Bottom - height - margin;
+            }
+            else if (edge == DockEdge.Left)
+            {
+                left = area.Left + margin;
+                top = PositionedVertical(
+                    area,
+                    height,
+                    margin,
+                    position);
+            }
+            else if (edge == DockEdge.Right)
+            {
+                left = area.Right - width - margin;
+                top = PositionedVertical(
+                    area,
+                    height,
+                    margin,
+                    position);
+            }
+            else
+            {
+                left = PositionedHorizontal(
+                    area,
+                    width,
+                    margin,
+                    position);
+                top = area.Top + margin;
+            }
+            return new Rectangle(left, top, width, height);
+        }
+
+        private void PrefetchFrostedBackdropForTarget()
+        {
+            if (!IsHandleCreated ||
+                IsDisposed ||
+                !glassModeEnabled ||
+                !frostedGlassEnabled ||
+                frostedIntensity <= 0.01)
+            {
+                return;
+            }
+
+            Screen screen = ResolveDockScreen(
+                new Point(
+                    Bounds.Left + Math.Max(1, Bounds.Width) / 2,
+                    Bounds.Top + Math.Max(1, Bounds.Height) / 2));
+            int targetWidth = currentIsTimer
+                ? (timerExpanded && HasMusicCompanion()
+                    ? TimerMultiWindowWidth
+                    : TimerWindowWidth)
+                : (currentIsMedia
+                    ? MusicTargetWidth
+                    : NotificationTargetWidth(false));
+            int targetHeight = currentIsTimer
+                ? (timerExpanded && HasMusicCompanion()
+                    ? TimerMultiWindowHeight
+                    : (timerExpanded
+                        ? TimerExpandedWindowHeight
+                        : TimerCompactWindowHeight))
+                : (currentIsMedia
+                    ? Scale(SideDocked
+                        ? SideMusicHeight
+                        : MusicHeight)
+                    : NotificationTargetHeight(false));
+            frostedBackdropDirty = false;
+            QueueFrostedBackdropCapture(
+                CalculateDockedBounds(
+                    screen,
+                    targetWidth,
+                    targetHeight,
+                    dockEdge,
+                    dockPosition));
+        }
+
         private void FinishWindowDrag()
         {
             dockScreenDevice =
@@ -4412,8 +6576,24 @@ namespace SmartWindow
                     1.0);
                 ScheduleNotificationCollapse(5200);
             }
-            StartFrameClock();
             dockPreview.HidePreview();
+            int targetWidth = currentIsMedia
+                ? MusicTargetWidth
+                : NotificationTargetWidth(false);
+            int targetHeight = currentIsMedia
+                ? Scale(SideDocked
+                    ? SideMusicHeight
+                    : MusicHeight)
+                : NotificationTargetHeight(false);
+            nextFrostedBackdropCapture = DateTime.MinValue;
+            QueueFrostedBackdropCapture(
+                CalculateDockedBounds(
+                    Screen.FromPoint(dragLastScreen),
+                    targetWidth,
+                    targetHeight,
+                    dockEdge,
+                    dockPosition));
+            StartFrameClock();
             ApplyGeometry();
             RequestRender();
             EventHandler handler = DockEdgeChanged;
@@ -4492,7 +6672,8 @@ namespace SmartWindow
 
         private void ResetControlsTimeout()
         {
-            if (!musicControlsVisible)
+            if (!musicControlsVisible &&
+                !(timerExpanded && currentIsTimer))
             {
                 return;
             }
@@ -4514,7 +6695,17 @@ namespace SmartWindow
             }
             try
             {
-                BeginInvoke(new Action(CollapseMusicControls));
+                BeginInvoke(new Action(delegate
+                {
+                    if (timerExpanded && currentIsTimer)
+                    {
+                        CollapseTimerControls();
+                    }
+                    if (musicControlsVisible && currentIsMedia)
+                    {
+                        CollapseMusicControls();
+                    }
+                }));
             }
             catch
             {
@@ -4544,6 +6735,22 @@ namespace SmartWindow
             }
         }
 
+        private void CollapseTimerControls()
+        {
+            StopControlsTimeout();
+            if (!timerExpanded || !currentIsTimer)
+            {
+                return;
+            }
+            timerExpanded = false;
+            SetSpringTarget(
+                TimerWindowWidth,
+                TimerCompactWindowHeight,
+                0.0);
+            StartFrameClock();
+            RequestRender();
+        }
+
         private int HitTestMusicButton(Point point)
         {
             for (int index = 0; index < 3; index++)
@@ -4554,6 +6761,139 @@ namespace SmartWindow
                 }
             }
             return -1;
+        }
+
+        private int HitTestTimerButton(Point point)
+        {
+            if (!currentIsTimer ||
+                !timerExpanded ||
+                timerSnapshot == null)
+            {
+                return -1;
+            }
+            int buttonCount = timerSnapshot.Mode == SmartTimerMode.Stopwatch
+                ? 3
+                : 2;
+            int gap = Scale(8);
+            int panelWidth = IsMultiWindowExpanded && !SideDocked
+                ? Math.Max(
+                    1,
+                    (ClientSize.Width - Scale(16)) / 2)
+                : ClientSize.Width;
+            int left = Scale(18);
+            int available =
+                panelWidth - Scale(36) - gap * (buttonCount - 1);
+            int buttonWidth = Math.Max(1, available / buttonCount);
+            int buttonTop = IsMultiWindowExpanded
+                ? Scale(120)
+                : (SideDocked
+                    ? ClientSize.Height - Scale(58)
+                    : Scale(92));
+            int buttonHeight = SideDocked && !IsMultiWindowExpanded
+                ? Scale(42)
+                : Scale(44);
+            for (int index = 0; index < buttonCount; index++)
+            {
+                Rectangle bounds = new Rectangle(
+                    left + index * (buttonWidth + gap),
+                    buttonTop,
+                    buttonWidth,
+                    buttonHeight);
+                if (bounds.Contains(point))
+                {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        private int HitTestMultiMusicButton(Point point)
+        {
+            if (!IsMultiWindowExpanded)
+            {
+                return -1;
+            }
+            int gap = Scale(16);
+            int panelWidth;
+            int rightLeft;
+            int buttonTop;
+            if (SideDocked)
+            {
+                panelWidth = ClientSize.Width;
+                int panelHeight = Math.Max(
+                    1,
+                    (ClientSize.Height - gap) / 2);
+                rightLeft = 0;
+                buttonTop = panelHeight + gap + Scale(120);
+            }
+            else
+            {
+                panelWidth = Math.Max(
+                    1,
+                    (ClientSize.Width - gap) / 2);
+                rightLeft = panelWidth + gap;
+                buttonTop = Scale(120);
+            }
+            int buttonGap = Scale(8);
+            int padding = Scale(16);
+            int width = Math.Max(
+                Scale(38),
+                (panelWidth - padding * 2 - buttonGap * 2) / 3);
+            for (int index = 0; index < 3; index++)
+            {
+                Rectangle bounds = new Rectangle(
+                    rightLeft + padding + index * (width + buttonGap),
+                    buttonTop,
+                    width,
+                    Scale(44));
+                if (bounds.Contains(point))
+                {
+                    return index;
+                }
+            }
+            return -1;
+        }
+
+        private Rectangle MultiMusicPanelBounds
+        {
+            get
+            {
+                int gap = Scale(16);
+                if (SideDocked)
+                {
+                    int panelHeight = Math.Max(
+                        1,
+                        (ClientSize.Height - gap) / 2);
+                    return new Rectangle(
+                        0,
+                        panelHeight + gap,
+                        ClientSize.Width,
+                        Math.Max(
+                            1,
+                            ClientSize.Height - panelHeight - gap));
+                }
+                int panelWidth = Math.Max(
+                    1,
+                    (ClientSize.Width - gap) / 2);
+                return new Rectangle(
+                    panelWidth + gap,
+                    0,
+                    Math.Max(1, ClientSize.Width - panelWidth - gap),
+                    ClientSize.Height);
+            }
+        }
+
+        private Rectangle MultiMusicProgressBounds
+        {
+            get
+            {
+                Rectangle panel = MultiMusicPanelBounds;
+                return new Rectangle(
+                    panel.Left + Scale(82),
+                    panel.Top + Scale(78),
+                    Math.Max(1, panel.Width - Scale(100)),
+                    Scale(5));
+            }
         }
 
         private Rectangle MusicButtonBounds(int index)
@@ -4613,6 +6953,7 @@ namespace SmartWindow
                 titleFont.Dispose();
                 bodyFont.Dispose();
                 tinyFont.Dispose();
+                timerTimeFont.Dispose();
             }
             string[] fonts = new string[]
             {
@@ -4624,6 +6965,7 @@ namespace SmartWindow
             titleFont = CreateFont(fonts, 12.0f, FontStyle.Bold, dpi);
             bodyFont = CreateFont(fonts, 10.4f, FontStyle.Regular, dpi);
             tinyFont = CreateFont(fonts, 8.6f, FontStyle.Regular, dpi);
+            timerTimeFont = CreateFont(fonts, 18.0f, FontStyle.Bold, dpi);
         }
 
         private static Font CreateFont(
@@ -4732,8 +7074,35 @@ namespace SmartWindow
             public uint Colors;
         }
 
+        private delegate void WinEventDelegate(
+            IntPtr hook,
+            uint eventType,
+            IntPtr window,
+            int objectId,
+            int childId,
+            uint eventThread,
+            uint eventTime);
+
         [DllImport("dwmapi.dll")]
         private static extern int DwmFlush();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetWinEventHook(
+            uint eventMin,
+            uint eventMax,
+            IntPtr module,
+            WinEventDelegate callback,
+            uint processId,
+            uint threadId,
+            uint flags);
+
+        [DllImport("user32.dll")]
+        private static extern bool UnhookWinEvent(IntPtr hook);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool SetWindowDisplayAffinity(
+            IntPtr window,
+            uint affinity);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern int GetWindowLong(
@@ -4816,16 +7185,45 @@ namespace SmartWindow
                 StopFrameClock();
                 sequenceTimer.Dispose();
                 controlsTimer.Dispose();
+                if (desktopChangeHook != IntPtr.Zero)
+                {
+                    UnhookWinEvent(desktopChangeHook);
+                    desktopChangeHook = IntPtr.Zero;
+                }
                 mouseHook.Dispose();
                 dockPreview.Dispose();
                 microFont.Dispose();
                 titleFont.Dispose();
                 bodyFont.Dispose();
                 tinyFont.Dispose();
+                timerTimeFont.Dispose();
                 if (albumArtwork != null)
                 {
                     albumArtwork.Dispose();
                     albumArtwork = null;
+                }
+                if (frostedNoiseBrush != null)
+                {
+                    frostedNoiseBrush.Dispose();
+                    frostedNoiseBrush = null;
+                }
+                if (frostedNoiseTile != null)
+                {
+                    frostedNoiseTile.Dispose();
+                    frostedNoiseTile = null;
+                }
+                lock (frostedBackdropSync)
+                {
+                    if (frostedBackdrop != null)
+                    {
+                        frostedBackdrop.Dispose();
+                        frostedBackdrop = null;
+                    }
+                }
+                if (frostedShellCache != null)
+                {
+                    frostedShellCache.Dispose();
+                    frostedShellCache = null;
                 }
                 ReleaseLayeredSurface();
                 frameStopEvent.Dispose();

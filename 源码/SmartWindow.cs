@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Media;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -1520,6 +1521,7 @@ namespace SmartWindow
         private readonly System.Windows.Forms.Timer bannerRefreshTimer;
         private readonly System.Windows.Forms.Timer settingsSaveTimer;
         private readonly System.Windows.Forms.Timer healthTimer;
+        private readonly System.Windows.Forms.Timer timerTicker;
         private readonly string settingsPath;
         private readonly string historyPath;
         private readonly FullscreenDetector fullscreenDetector;
@@ -1527,14 +1529,25 @@ namespace SmartWindow
             new List<NotificationHistoryEntry>();
         private readonly HashSet<string> filteredApps =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly SmartTimerSession timerSession =
+            new SmartTimerSession();
+        private readonly List<TimerPreset> timerPresets =
+            new List<TimerPreset>();
         private readonly bool showConsole;
         private bool paused;
         private bool musicMode;
         private bool musicPersistent;
         private bool transparentWindow;
         private bool qualityEnhancement;
+        private bool frostedGlassEnabled;
         private double uiScale = 1.0;
+        private int maximumFrameRate = 120;
+        private Color timerAccentColor = Color.FromArgb(100, 181, 246);
+        private string timerSoundPath = "";
+        private bool timerCompletionSoundPlayed;
+        private SoundPlayer timerSoundPlayer;
         private double consoleOpacity = 0.5;
+        private double frostedIntensity = 0.55;
         private bool autoStart;
         private bool movementEnabled;
         private bool clickThroughEnabled;
@@ -1573,10 +1586,17 @@ namespace SmartWindow
             LoadNotificationHistory();
             LoadFilteredApps();
             installedAt = ReadInstallDate();
+            timerAccentColor = ReadTimerColor();
+            timerSession.SetAccentColor(timerAccentColor);
+            LoadTimerPresets();
+            timerSoundPath = ReadStringSetting("timerSoundPath");
             Localization.SetLanguage(ReadLanguage());
             transparentWindow = ReadTransparentWindow();
             qualityEnhancement =
                 transparentWindow && ReadBooleanSetting("qualityEnhancement");
+            frostedGlassEnabled =
+                transparentWindow && ReadBooleanSetting("frostedGlass");
+            frostedIntensity = ReadFrostedIntensity();
             movementEnabled = ReadBooleanSetting("windowMovement");
             clickThroughEnabled = ReadBooleanSetting("clickThrough");
             safeMode = CrashGuard.IsSafeMode();
@@ -1584,6 +1604,7 @@ namespace SmartWindow
             {
                 transparentWindow = false;
                 qualityEnhancement = false;
+                frostedGlassEnabled = false;
                 movementEnabled = false;
                 clickThroughEnabled = false;
             }
@@ -1742,10 +1763,36 @@ namespace SmartWindow
                     SetMusicMode(false);
                 }
             };
+            island.TimerPauseToggleRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.TogglePause(mode);
+                PublishTimerState();
+            };
+            island.TimerCancelRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.Cancel(mode);
+                PublishTimerState();
+            };
+            island.TimerLapRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.AddLap(mode);
+                PublishTimerState();
+            };
             uiScale = ReadUiScale();
+            maximumFrameRate = ReadMaximumFrameRate();
             island.SetUiScale(uiScale);
+            island.SetFrameRateLimit(maximumFrameRate);
             island.SetGlassMode(transparentWindow);
             island.SetQualityEnhancement(qualityEnhancement);
+            island.SetFrostedGlass(
+                frostedGlassEnabled && transparentWindow,
+                frostedIntensity);
             island.SetVolume(SystemVolume.Get());
             island.SetMovementEnabled(movementEnabled);
             island.SetClickThrough(clickThroughEnabled);
@@ -1785,6 +1832,10 @@ namespace SmartWindow
                 delegate { OpenNotificationManagement(true); });
 
             console = new ConsoleForm();
+            console.SetPerformanceProvider(delegate
+            {
+                return island.GetPerformanceSnapshot();
+            });
             console.PauseToggleRequested += delegate { TogglePause(); };
             console.MusicToggleRequested += delegate
             {
@@ -1842,9 +1893,13 @@ namespace SmartWindow
                 if (!transparentWindow)
                 {
                     qualityEnhancement = false;
+                    frostedGlassEnabled = false;
                 }
                 island.SetGlassMode(transparentWindow);
                 island.SetQualityEnhancement(qualityEnhancement);
+                island.SetFrostedGlass(
+                    frostedGlassEnabled && transparentWindow,
+                    frostedIntensity);
                 SaveSettings();
                 RefreshConsoleState();
             };
@@ -1856,6 +1911,19 @@ namespace SmartWindow
                 }
                 qualityEnhancement = !qualityEnhancement;
                 island.SetQualityEnhancement(qualityEnhancement);
+                SaveSettings();
+                RefreshConsoleState();
+            };
+            console.FrostedGlassToggleRequested += delegate
+            {
+                if (!transparentWindow)
+                {
+                    return;
+                }
+                frostedGlassEnabled = !frostedGlassEnabled;
+                island.SetFrostedGlass(
+                    frostedGlassEnabled,
+                    frostedIntensity);
                 SaveSettings();
                 RefreshConsoleState();
             };
@@ -1901,6 +1969,117 @@ namespace SmartWindow
                 consoleOpacity = Math.Max(0.0, Math.Min(1.0, opacity));
                 ScheduleSaveSettings();
             };
+            console.FrostedIntensityChanged += delegate(
+                object sender,
+                double intensity)
+            {
+                frostedIntensity = Math.Max(
+                    0.0,
+                    Math.Min(1.0, intensity));
+                island.SetFrostedGlass(
+                    frostedGlassEnabled && transparentWindow,
+                    frostedIntensity);
+                ScheduleSaveSettings();
+            };
+            console.FrameRateLimitChanged += delegate(
+                object sender,
+                int frameRate)
+            {
+                maximumFrameRate = Math.Max(
+                    60,
+                    Math.Min(165, frameRate));
+                island.SetFrameRateLimit(maximumFrameRate);
+                SaveSettings();
+                RefreshConsoleState();
+            };
+            console.TimerStartRequested += delegate(
+                object sender,
+                TimerStartRequest request)
+            {
+                if (request == null)
+                {
+                    return;
+                }
+                timerCompletionSoundPlayed = false;
+                timerSession.SetAccentColor(timerAccentColor);
+                if (request.Mode == SmartTimerMode.Stopwatch)
+                {
+                    timerSession.StartStopwatch();
+                }
+                else
+                {
+                    timerSession.StartCountdown(request.Duration);
+                }
+                PublishTimerState();
+            };
+            console.TimerPauseToggleRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.TogglePause(mode);
+                PublishTimerState();
+            };
+            console.TimerCancelRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.Cancel(mode);
+                timerCompletionSoundPlayed = false;
+                PublishTimerState();
+            };
+            console.TimerLapRequested += delegate(
+                object sender,
+                SmartTimerMode mode)
+            {
+                timerSession.AddLap(mode);
+                PublishTimerState();
+            };
+            console.TimerColorChanged += delegate(
+                object sender,
+                Color color)
+            {
+                timerAccentColor = Color.FromArgb(255, color);
+                timerSession.SetAccentColor(timerAccentColor);
+                ScheduleSaveSettings();
+                PublishTimerState();
+            };
+            console.TimerPresetAddRequested += delegate(
+                object sender,
+                TimerPreset preset)
+            {
+                if (preset == null || timerPresets.Count >= 6)
+                {
+                    return;
+                }
+                timerPresets.Add(preset);
+                SaveSettings();
+                PublishTimerState();
+            };
+            console.TimerPresetDeleteRequested += delegate(
+                object sender,
+                int index)
+            {
+                if (index >= 0 && index < timerPresets.Count)
+                {
+                    timerPresets.RemoveAt(index);
+                    SaveSettings();
+                    PublishTimerState();
+                }
+            };
+            console.TimerSoundBrowseRequested += delegate
+            {
+                BrowseTimerSound();
+            };
+            console.TimerSoundPreviewRequested += delegate
+            {
+                PlayTimerAlert();
+            };
+            console.TimerSoundResetRequested += delegate
+            {
+                timerSoundPath = "";
+                SaveSettings();
+                PublishTimerState();
+            };
             console.SizeScaleChanged += delegate(
                 object sender,
                 double scale)
@@ -1922,6 +2101,20 @@ namespace SmartWindow
                 RefreshConsoleState();
                 console.RefreshLocalization();
             };
+            timerTicker = new System.Windows.Forms.Timer();
+            timerTicker.Interval = 100;
+            timerTicker.Tick += delegate
+            {
+                timerSession.Tick();
+                PublishTimerState();
+                if (timerSession.IsCompleted &&
+                    !timerCompletionSoundPlayed)
+                {
+                    timerCompletionSoundPlayed = true;
+                    PlayTimerAlert();
+                }
+            };
+            timerTicker.Start();
             RefreshConsoleState(
                 safeMode
                     ? Localization.Get("safeModeActive")
@@ -2268,8 +2461,17 @@ namespace SmartWindow
             qualityEnhancement =
                 transparentWindow &&
                 ReadBooleanSetting("qualityEnhancement");
+            frostedGlassEnabled =
+                transparentWindow &&
+                ReadBooleanSetting("frostedGlass");
+            frostedIntensity = ReadFrostedIntensity();
             uiScale = ReadUiScale();
+            maximumFrameRate = ReadMaximumFrameRate();
             consoleOpacity = ReadConsoleOpacity();
+            timerAccentColor = ReadTimerColor();
+            timerSession.SetAccentColor(timerAccentColor);
+            LoadTimerPresets();
+            timerSoundPath = ReadStringSetting("timerSoundPath");
             movementEnabled = ReadBooleanSetting("windowMovement");
             clickThroughEnabled = ReadBooleanSetting("clickThrough");
             if (clickThroughEnabled)
@@ -2284,8 +2486,13 @@ namespace SmartWindow
             musicModeItem.Checked = musicMode;
             musicPersistentItem.Checked = musicPersistent;
             island.SetUiScale(uiScale);
+            island.SetFrameRateLimit(maximumFrameRate);
+            PublishTimerState();
             island.SetGlassMode(transparentWindow);
             island.SetQualityEnhancement(qualityEnhancement);
+            island.SetFrostedGlass(
+                frostedGlassEnabled && transparentWindow,
+                frostedIntensity);
             island.SetMovementEnabled(movementEnabled);
             island.SetClickThrough(clickThroughEnabled);
             island.SetDockEdge(dockEdge);
@@ -2322,13 +2529,22 @@ namespace SmartWindow
             musicPersistent = false;
             transparentWindow = false;
             qualityEnhancement = false;
+            frostedGlassEnabled = false;
             movementEnabled = false;
             clickThroughEnabled = false;
             dockEdge = "top";
             dockPosition = 1;
             dockScreen = "";
             uiScale = 1.0;
+            maximumFrameRate = 120;
             consoleOpacity = 0.5;
+            timerAccentColor = Color.FromArgb(100, 181, 246);
+            timerSoundPath = "";
+            timerSession.CancelAll();
+            timerSession.SetAccentColor(timerAccentColor);
+            timerPresets.Clear();
+            AddDefaultTimerPresets();
+            PublishTimerState();
             filteredApps.Clear();
             CrashGuard.MarkHealthy();
             safeMode = false;
@@ -2338,8 +2554,10 @@ namespace SmartWindow
             musicModeItem.Checked = false;
             musicPersistentItem.Checked = false;
             island.SetUiScale(uiScale);
+            island.SetFrameRateLimit(maximumFrameRate);
             island.SetGlassMode(false);
             island.SetQualityEnhancement(false);
+            island.SetFrostedGlass(false, frostedIntensity);
             island.SetMovementEnabled(false);
             island.SetClickThrough(false);
             island.SetDockEdge(dockEdge);
@@ -2367,6 +2585,8 @@ namespace SmartWindow
                 musicPersistent,
                 transparentWindow,
                 qualityEnhancement,
+                frostedGlassEnabled,
+                frostedIntensity,
                 autoStart,
                 movementEnabled,
                 clickThroughEnabled,
@@ -2375,7 +2595,86 @@ namespace SmartWindow
                         paused ? "statusPaused" : "statusRunning"),
                 uiScale,
                 consoleOpacity,
+                maximumFrameRate,
                 installedAt);
+        }
+
+        private void PublishTimerState()
+        {
+            if (island == null || island.IsDisposed)
+            {
+                return;
+            }
+            TimerSnapshot snapshot = timerSession.CreateSnapshot(
+                SmartTimerMode.Countdown);
+            island.UpdateTimer(snapshot);
+            if (console != null && !console.IsDisposed)
+            {
+                console.SetTimerState(
+                    snapshot,
+                    timerPresets.ToArray(),
+                    timerSoundPath);
+            }
+        }
+
+        private void BrowseTimerSound()
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = Localization.Get("timerChooseSound");
+                dialog.Filter = "WAV (*.wav)|*.wav";
+                dialog.CheckFileExists = true;
+                if (dialog.ShowDialog(console) != DialogResult.OK)
+                {
+                    return;
+                }
+                timerSoundPath = dialog.FileName;
+                SaveSettings();
+                PublishTimerState();
+            }
+        }
+
+        private void PlayTimerAlert()
+        {
+            try
+            {
+                string path = timerSoundPath;
+                if (!string.IsNullOrWhiteSpace(path) &&
+                    File.Exists(path))
+                {
+                    try
+                    {
+                        PlayTimerAlertFile(path);
+                        return;
+                    }
+                    catch (Exception exception)
+                    {
+                        Logger.Write(
+                            "Custom timer alert failed: " +
+                            exception);
+                    }
+                }
+                PlayTimerAlertFile(RuntimeAssets.TimerAlertPath);
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("PlayTimerAlert: " + exception);
+            }
+        }
+
+        private void PlayTimerAlertFile(string path)
+        {
+            if (!File.Exists(path))
+            {
+                return;
+            }
+            if (timerSoundPlayer != null)
+            {
+                timerSoundPlayer.Dispose();
+            }
+            timerSoundPlayer = new SoundPlayer(path);
+            timerSoundPlayer.Load();
+            timerSoundPlayer.Play();
         }
 
         private void RefreshLocalizedText()
@@ -2723,6 +3022,128 @@ namespace SmartWindow
             return 1.0;
         }
 
+        private int ReadMaximumFrameRate()
+        {
+            try
+            {
+                if (!File.Exists(settingsPath))
+                {
+                    return 120;
+                }
+                string[] lines = File.ReadAllLines(settingsPath, Encoding.UTF8);
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index].Trim();
+                    if (line.StartsWith(
+                        "maximumFrameRate=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        int value;
+                        if (int.TryParse(
+                            line.Substring("maximumFrameRate=".Length),
+                            out value))
+                        {
+                            return Math.Max(60, Math.Min(165, value));
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadMaximumFrameRate: " + exception);
+            }
+            return 120;
+        }
+
+        private Color ReadTimerColor()
+        {
+            string value = ReadStringSetting("timerColor");
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                try
+                {
+                    return ColorTranslator.FromHtml(value);
+                }
+                catch
+                {
+                }
+            }
+            return Color.FromArgb(100, 181, 246);
+        }
+
+        private void LoadTimerPresets()
+        {
+            timerPresets.Clear();
+            string value = ReadStringSetting("timerPresets");
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                string[] parts = value.Split(';');
+                for (int index = 0;
+                    index < parts.Length && timerPresets.Count < 12;
+                    index++)
+                {
+                    string part = parts[index];
+                    int separator = part.LastIndexOf('|');
+                    if (separator <= 0 ||
+                        separator >= part.Length - 1)
+                    {
+                        continue;
+                    }
+                    int seconds;
+                    if (!int.TryParse(
+                        part.Substring(separator + 1),
+                        out seconds) ||
+                        seconds < 1)
+                    {
+                        continue;
+                    }
+                    string name;
+                    try
+                    {
+                        name = Uri.UnescapeDataString(
+                            part.Substring(0, separator));
+                    }
+                    catch
+                    {
+                        name = part.Substring(0, separator);
+                    }
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+                    timerPresets.Add(new TimerPreset(
+                        name.Substring(0, Math.Min(32, name.Length)),
+                        seconds));
+                }
+            }
+            if (timerPresets.Count == 0)
+            {
+                AddDefaultTimerPresets();
+            }
+        }
+
+        private void AddDefaultTimerPresets()
+        {
+            timerPresets.Add(new TimerPreset("专注 25 分钟", 25 * 60));
+            timerPresets.Add(new TimerPreset("休息 5 分钟", 5 * 60));
+            timerPresets.Add(new TimerPreset("快速 1 分钟", 60));
+            timerPresets.Add(new TimerPreset("泡茶 3 分钟", 3 * 60));
+        }
+
+        private string EncodeTimerPresets()
+        {
+            List<string> encoded = new List<string>();
+            for (int index = 0; index < timerPresets.Count; index++)
+            {
+                TimerPreset preset = timerPresets[index];
+                encoded.Add(
+                    Uri.EscapeDataString(preset.Name ?? "") +
+                    "|" +
+                    preset.DurationSeconds);
+            }
+            return string.Join(";", encoded.ToArray());
+        }
+
         private bool ReadTransparentWindow()
         {
             try
@@ -2973,6 +3394,41 @@ namespace SmartWindow
             return 0.5;
         }
 
+        private double ReadFrostedIntensity()
+        {
+            try
+            {
+                if (!File.Exists(settingsPath))
+                {
+                    return 0.55;
+                }
+                string[] lines = File.ReadAllLines(settingsPath, Encoding.UTF8);
+                for (int index = 0; index < lines.Length; index++)
+                {
+                    string line = lines[index].Trim();
+                    if (line.StartsWith(
+                        "frostedIntensity=",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        double value;
+                        if (double.TryParse(
+                            line.Substring("frostedIntensity=".Length),
+                            System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            out value))
+                        {
+                            return Math.Max(0.0, Math.Min(1.0, value));
+                        }
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                Logger.Write("ReadFrostedIntensity: " + exception);
+            }
+            return 0.55;
+        }
+
         private void ScheduleSaveSettings()
         {
             settingsSaveTimer.Stop();
@@ -2998,11 +3454,33 @@ namespace SmartWindow
                         "0.###",
                         System.Globalization.CultureInfo.InvariantCulture) +
                     Environment.NewLine +
+                    "maximumFrameRate=" +
+                    maximumFrameRate +
+                    Environment.NewLine +
+                    "timerColor=#" +
+                    timerAccentColor.R.ToString("X2") +
+                    timerAccentColor.G.ToString("X2") +
+                    timerAccentColor.B.ToString("X2") +
+                    Environment.NewLine +
+                    "timerSoundPath=" +
+                    (timerSoundPath ?? "") +
+                    Environment.NewLine +
+                    "timerPresets=" +
+                    EncodeTimerPresets() +
+                    Environment.NewLine +
                     "transparentWindow=" +
                     (transparentWindow ? "1" : "0") +
                     Environment.NewLine +
                     "qualityEnhancement=" +
                     (qualityEnhancement ? "1" : "0") +
+                    Environment.NewLine +
+                    "frostedGlass=" +
+                    (frostedGlassEnabled ? "1" : "0") +
+                    Environment.NewLine +
+                    "frostedIntensity=" +
+                    frostedIntensity.ToString(
+                        "0.###",
+                        System.Globalization.CultureInfo.InvariantCulture) +
                     Environment.NewLine +
                     "windowMovement=" +
                     (movementEnabled ? "1" : "0") +
@@ -3054,6 +3532,16 @@ namespace SmartWindow
             healthTimer.Dispose();
             settingsSaveTimer.Stop();
             settingsSaveTimer.Dispose();
+            if (timerTicker != null)
+            {
+                timerTicker.Stop();
+                timerTicker.Dispose();
+            }
+            if (timerSoundPlayer != null)
+            {
+                timerSoundPlayer.Dispose();
+                timerSoundPlayer = null;
+            }
             monitor.Dispose();
             mediaMonitor.Dispose();
             hotkeys.Dispose();
