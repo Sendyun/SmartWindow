@@ -13,7 +13,7 @@ namespace SmartWindow
         private const int LogicalWidth = 1000;
         private const int LogicalHeight = 720;
         private const int HeaderHeight = 92;
-        private const string DisplayVersion = "Ver 1.2.0";
+        private const string DisplayVersion = "Ver 1.3.0";
 
         private readonly Bitmap logoLight;
         private readonly Bitmap logoDark;

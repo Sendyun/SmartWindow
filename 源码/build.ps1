@@ -42,6 +42,7 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     "$sourceRoot\ConsoleForm.cs" `
     "$sourceRoot\ManagementForms.cs" `
     "$sourceRoot\EmbeddedAssets.cs" `
+    "$sourceRoot\WindowsCompatibility.cs" `
     "$sourceRoot\Localization.cs" `
     "$sourceRoot\DonationIntegrity.cs" `
     "$sourceRoot\AssemblyInfo.cs"

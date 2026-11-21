@@ -1,8 +1,8 @@
 # 智慧窗 / SmartWindow
 
-**Ver 1.2.0**
+**Ver 1.3.0**
 
-智慧窗是一款面向 Windows 11 的顶部通知与音乐控制浮窗工具。它将系统通知和当前媒体信息显示在屏幕顶部中央，并提供类似灵动岛的展开、收拢与音乐控制体验。
+智慧窗是一款面向 Windows 10 与 Windows 11 的顶部通知与音乐控制浮窗工具。它将系统通知和当前媒体信息显示在屏幕顶部中央，并提供类似灵动岛的展开、收拢与音乐控制体验。
 
 ## 功能
 
@@ -12,6 +12,7 @@
 - 支持透明智慧窗、独立的质感增强与真实背景模糊的磨砂质感增强、光粒子和粒子擦除动画。
 - 支持拖动收拢圆形、四边自动停靠和停靠位置记忆。
 - 支持防遮挡鼠标穿透、多显示器、DPI 和任务栏避让。
+- Windows 10 与 Windows 11 使用同一套通知、媒体、动画和停靠能力。
 - 支持通知历史、应用过滤和全屏自动静默。
 - 支持媒体进度跳转、系统音量和声音设备设置。
 - 支持控制台透明度与 80%–120% 窗口缩放。
@@ -30,18 +31,18 @@
 
 Microsoft Store 安装程序：
 
-- [`releases/1.2.0/SmartWindow-Setup-x64.exe`](releases/1.2.0/SmartWindow-Setup-x64.exe)
+- [`releases/1.3.0/SmartWindow-Setup-x64.exe`](releases/1.3.0/SmartWindow-Setup-x64.exe)
 - 静默安装：`SmartWindow-Setup-x64.exe /S`
 - 静默卸载：`Uninstall SmartWindow.exe /uninstall /S`
 
 商店提交使用的固定版本下载地址：
 
 ```text
-https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.2.0/SmartWindow-Setup-x64.exe
+https://raw.githubusercontent.com/Sendyun/SmartWindow/main/releases/1.3.0/SmartWindow-Setup-x64.exe
 ```
 
 历史 Microsoft Store MSIX 上传包仍保留在 `releases/1.1.2`。
-Ver 1.2.0 Release 当前提供安装程序、便携版和完整源码；重新生成 MSIX 时，
+Ver 1.3.0 Release 当前提供安装程序、便携版和完整源码；重新生成 MSIX 时，
 先准备 Windows SDK 中的 `MakeAppx.exe` 与 `SignTool.exe`，然后运行：
 
 ```powershell
@@ -89,7 +90,9 @@ Ver 1.2.0 Release 当前提供安装程序、便携版和完整源码；重新�
 
 ## 系统要求
 
+- Windows 10 1809（Build 17763）或更高版本
 - Windows 11
+- x64
 - 无需管理员权限
 - 无需额外安装 .NET 运行库
 

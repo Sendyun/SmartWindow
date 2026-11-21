@@ -1,0 +1,5 @@
+SmartWindow 1.3.0 now supports Windows 10 version 1809 and later.
+
+This update adds full Windows 10 compatibility for notifications, media artwork and controls, timers, translucent and frosted-glass effects, particle animations, multi-window layouts, docking, taskbar-aware positioning, and all six interface languages. System-version detection now provides a clear message on unsupported devices, and media monitoring no longer enters a restart loop when the required system capability is unavailable.
+
+Windows 11 keeps the high-refresh visual experience. This update also fixes countdown alerts continuing after a timer is closed.

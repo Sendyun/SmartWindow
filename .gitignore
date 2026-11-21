@@ -5,6 +5,8 @@
 settings.ini
 /SmartWindow-Setup-x64.exe
 /*.zip
+/SmartWindow_*_x64.msix
+/SmartWindow_*_x64.msixupload
 /msix/staging/
 /msix/verify/
 /msix/upload/

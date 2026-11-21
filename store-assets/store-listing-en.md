@@ -6,11 +6,11 @@ SmartWindow
 
 ## Short description
 
-Bring Windows 11 notifications and current media into a polished top-screen capsule with glass effects, animated particles, and playback controls.
+Bring Windows 10/11 notifications and current media into a polished top-screen capsule with glass effects, animated particles, and playback controls.
 
 ## Description
 
-SmartWindow is a compact Windows 11 utility that reorganizes notifications and media information around the top center of your screen.
+SmartWindow is a compact Windows 10 and Windows 11 utility that reorganizes notifications and media information around the top center of your screen.
 
 Incoming notifications expand from a subtle circular seed into a clear information capsule, then collapse automatically when they are finished. When media is playing, SmartWindow displays album artwork, title, artist, and an animated waveform with previous, play or pause, and next controls.
 
@@ -46,19 +46,17 @@ SmartWindow processes notification and media information locally. It does not up
 
 ## What's new
 
-Version 1.0.1:
+Version 1.3.0:
 
-- Added Start with Windows
-- Added a GitHub shortcut in About
-- Refined the console brand layout
-- Improved notification timing and collapse stability
-- Improved media control responsiveness
-- Fixed orphaned background media processes
-- Improved the two-sided particle dissolve animation
+- Added full compatibility with Windows 10 version 1809 and later
+- Unified notification, music, timer, frosted-glass, particle, and docking features across Windows 10 and Windows 11
+- Added system-version detection and a clear unsupported-system message
+- Improved media monitoring, translucent windows, and high-refresh animations on Windows 10
+- Fixed countdown alerts continuing after the timer is closed
 
 ## Search terms
 
-notifications, music player, media controls, Windows 11, floating window, top bar, notification center
+notifications, music player, media controls, Windows 10, Windows 11, floating window, top bar, notification center
 
 ## Support information
 
@@ -80,7 +78,9 @@ https://github.com/Sendyun/SmartWindow/blob/main/LICENSE.md
 
 ## System requirements
 
-- Windows 11 x64
+- Windows 10 version 1809 (build 17763) or later
+- Windows 11
+- x64
 - No administrator permission required for the portable application
 - No additional .NET runtime installation required
 

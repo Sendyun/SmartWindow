@@ -60,6 +60,15 @@ namespace SmartWindow
                 EnsureCommandDaemon();
                 return;
             }
+            if (!WindowsCompatibility.SupportsMediaSessions)
+            {
+                Logger.Write(
+                    "Media monitoring requires " +
+                    WindowsCompatibility.MinimumRequirementText +
+                    ".");
+                RaiseStopped();
+                return;
+            }
             if (!File.Exists(scriptPath))
             {
                 Logger.Write("MediaMonitor script missing: " + scriptPath);

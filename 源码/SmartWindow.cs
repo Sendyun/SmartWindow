@@ -160,9 +160,23 @@ namespace SmartWindow
             bool restoreOnly = HasArgument(args, "--restore");
             bool muteBanners = !HasArgument(args, "--no-mute");
             bool showConsole = !HasArgument(args, "--background");
+            WindowsCompatibility.Initialize();
 
             if (!DonationIntegrityGuard.EnforceOrShutdown())
             {
+                return;
+            }
+
+            if (!WindowsCompatibility.IsSupported)
+            {
+                MessageBox.Show(
+                    "智慧窗需要 " +
+                    WindowsCompatibility.MinimumRequirementText +
+                    "。\r\n\r\n当前系统：" +
+                    WindowsCompatibility.DisplayName,
+                    "智慧窗",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
                 return;
             }
 
@@ -193,6 +207,12 @@ namespace SmartWindow
                 try
                 {
                     RuntimeAssets.Initialize();
+                    Logger.Write(
+                        "Running on " +
+                        WindowsCompatibility.DisplayName +
+                        " (Windows 10 compatibility=" +
+                        (WindowsCompatibility.IsWindows10 ? "true" : "false") +
+                        ").");
                     // A previous forced shutdown can leave banner settings muted.
                     muter.RestoreBackup();
                     if (restoreOnly)

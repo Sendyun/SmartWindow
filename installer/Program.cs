@@ -9,7 +9,7 @@ using Microsoft.Win32;
 internal static class SmartWindowSetup
 {
     private const string ProductName = "智慧窗";
-    private const string ProductVersion = "1.2.0";
+    private const string ProductVersion = "1.3.0";
     private const string Publisher =
         "Mr.Dove (Sendyun Technology Unit)";
     private const string UninstallKey =
@@ -46,6 +46,18 @@ internal static class SmartWindowSetup
         if (uninstall)
         {
             return Uninstall(targetDirectory, silent);
+        }
+        if (!IsSupportedOperatingSystem())
+        {
+            if (!silent)
+            {
+                MessageBox.Show(
+                    "智慧窗需要 Windows 10 1809（Build 17763）或更高版本。",
+                    ProductName,
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            return 1633;
         }
 
         if (!silent)
@@ -381,6 +393,12 @@ internal static class SmartWindowSetup
             }
         }
         return false;
+    }
+
+    private static bool IsSupportedOperatingSystem()
+    {
+        Version version = Environment.OSVersion.Version;
+        return version.Major >= 10 && version.Build >= 17763;
     }
 
     private static void ExtractResource(

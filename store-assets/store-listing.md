@@ -10,11 +10,11 @@ SmartWindow
 
 ## Short description
 
-将 Windows 11 通知和正在播放的音乐集中显示在屏幕顶部，并提供透明玻璃、动态粒子、媒体控制与开机自启动。
+将 Windows 10/11 通知和正在播放的音乐集中显示在屏幕顶部，并提供透明玻璃、动态粒子、媒体控制与开机自启动。
 
 ## Full description
 
-智慧窗是一款面向 Windows 11 的顶部通知与音乐控制工具。
+智慧窗是一款面向 Windows 10 与 Windows 11 的顶部通知与音乐控制工具。
 
 收到通知时，智慧窗会在屏幕顶部中央展开轻量胶囊，显示应用名称、消息标题和正文，结束后自动收拢消失。音乐播放时，顶部窗口会显示专辑封面、歌曲、歌手和动态波形，并可展开上一首、暂停或继续、下一首控制。
 
@@ -66,7 +66,9 @@ https://github.com/Sendyun/SmartWindow/blob/main/LICENSE.md
 
 ## System requirements
 
-- Windows 11 x64
+- Windows 10 1809（Build 17763）或更高版本
+- Windows 11
+- x64
 - No administrator permission required
 - No additional .NET runtime installation required
 
@@ -78,13 +80,11 @@ Copyright © 2026 Mr.Dove / Sendyun Technology Unit. All rights reserved.
 
 ## What's new
 
-Ver 1.0.1：
+Ver 1.3.0：
 
-- 新增开机自启动
-- 新增 GitHub 标志入口
-- 优化控制台品牌布局
-- 提升通知收拢和计时稳定性
-- 优化音乐控制响应
-- 修复后台媒体进程残留
-- 改进双向细砂粒子消失动画
+- 新增 Windows 10 1809 及以上版本的完整运行适配
+- Windows 10 与 Windows 11 统一支持通知、音乐、计时器、磨砂、粒子和停靠功能
+- 新增系统版本兼容检测和不受支持系统提示
+- 优化 Windows 10 下的媒体监听、透明窗口和高刷新率动画
+- 修复倒计时关闭后铃声可能继续播放的问题
 

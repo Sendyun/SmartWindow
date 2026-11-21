@@ -5,6 +5,12 @@ param(
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 
+if ([Environment]::OSVersion.Version.Build -lt 17763) {
+    [Console]::Error.WriteLine(
+        "Windows 10 version 1809 (build 17763) or later is required.")
+    exit 2
+}
+
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
 
 $transportType = [Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager, Windows.Media.Control, ContentType = WindowsRuntime]

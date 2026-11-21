@@ -27,8 +27,13 @@ Run:
 
 The script creates:
 
-- `SmartWindow_1.1.2.0_x64.msix`
-- `SmartWindow_1.1.2.0_x64.msixupload`
+- `SmartWindow_1.3.0.0_x64.msix`
+- `SmartWindow_1.3.0.0_x64.msixupload`
 
 The `.msixupload` file is the file to select in Partner Center.
+
+`userNotificationListener` must be declared as a `DeviceCapability`.
+Do not declare it as a `rescap:Capability`.
+
+The package targets Windows 10 version 1809 (build 17763) and later.
 
